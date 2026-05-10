@@ -55,17 +55,22 @@ to enable generalizable scene reconstruction and understanding.
 
 ## Installation
 
-Our code is developed based on pytorch 2.5.1, CUDA 12.4 and python 3.11. 
+Our code is developed with Python 3.11, PyTorch 2.5.1, and CUDA 12.4.
 
-We recommend using [conda](https://docs.anaconda.com/miniconda/) for installation:
+We use [uv](https://docs.astral.sh/uv/) for dependency management. From the repository root:
 
 ```bash
-conda create -n c3g python=3.11
-conda activate c3g
-
-pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
-pip install -r requirements.txt
+uv sync --frozen
+source .venv/bin/activate
 ```
+
+If you need to install `uv` first:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+The locked environment is defined by `pyproject.toml` and `uv.lock`.
 
 Then, you should download VGGT pretrained weights from [VGGT](https://github.com/facebookresearch/vggt/tree/main). Create a folder named `pretrained_weights` and save the file as `model.pt`.
 
