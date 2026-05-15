@@ -216,6 +216,7 @@ dependencies = [
     "scikit-video==1.1.11",
     "scipy==1.16.2",
     "seaborn==0.13.2",
+    "segment-anything @ git+https://github.com/facebookresearch/segment-anything.git",
     "semantic-version==2.10.0",
     "sentencepiece==0.1.99",
     "sentry-sdk==2.29.1",

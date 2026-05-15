@@ -84,7 +84,7 @@ def train(cfg_dict: DictConfig):
             mode="max",
         )
     )
-    callbacks[-1].CHECKPOINT_EQUALS_CHAR = '_'
+    callbacks[-1].CHECKPOINT_EQUALS_CHAR = "_"
 
     # Prepare the checkpoint for loading.
     checkpoint_path = update_checkpoint_path(cfg.checkpointing.load, cfg.wandb)
@@ -99,9 +99,11 @@ def train(cfg_dict: DictConfig):
         logger=logger,
         devices="auto",
         strategy=(
-            DDPStrategy(find_unused_parameters=False,
-                        broadcast_buffers=False,
-                        gradient_as_bucket_view=True)
+            DDPStrategy(
+                find_unused_parameters=False,
+                broadcast_buffers=False,
+                gradient_as_bucket_view=True,
+            )
             if torch.cuda.device_count() > 1
             else "auto"
         ),
@@ -115,39 +117,49 @@ def train(cfg_dict: DictConfig):
         accumulate_grad_batches=cfg.trainer.accumulate_grad_batches,
     )
     torch.manual_seed(cfg_dict.seed + trainer.global_rank)
-    
-    vggt, dino, lseg_feature_extractor, clip, feature_dim = load_foundation_model(cfg)
-    cfg.model.encoder.feature_dim = feature_dim if cfg.train.feature_rendering_loss > 0 else 0
+
+    vggt, dino, lseg_feature_extractor, clip, sam_encoder, feature_dim = (
+        load_foundation_model(cfg)
+    )
+    cfg.model.encoder.feature_dim = (
+        feature_dim if cfg.train.feature_rendering_loss > 0 else 0
+    )
 
     encoder, encoder_visualizer = get_encoder(cfg.model.encoder)
 
     # Load the encoder weights.
     if cfg.model.encoder.pretrained_weights and cfg.mode == "train":
         weight_path = cfg.model.encoder.pretrained_weights
-        ckpt_weights = torch.load(weight_path, map_location='cpu')
-        if 'model' in ckpt_weights:
-            ckpt_weights = ckpt_weights['model']
+        ckpt_weights = torch.load(weight_path, map_location="cpu")
+        if "model" in ckpt_weights:
+            ckpt_weights = ckpt_weights["model"]
             ckpt_weights = checkpoint_filter_fn(ckpt_weights, encoder)
-            missing_keys, unexpected_keys = encoder.load_state_dict(ckpt_weights, strict=False)
-        elif 'state_dict' in ckpt_weights:
-            ckpt_weights = ckpt_weights['state_dict']
-            ckpt_weights = {k[8:]: v for k, v in ckpt_weights.items() if k.startswith('encoder.')}
-            missing_keys, unexpected_keys = encoder.load_state_dict(ckpt_weights, strict=False)
+            missing_keys, unexpected_keys = encoder.load_state_dict(
+                ckpt_weights, strict=False
+            )
+        elif "state_dict" in ckpt_weights:
+            ckpt_weights = ckpt_weights["state_dict"]
+            ckpt_weights = {
+                k[8:]: v for k, v in ckpt_weights.items() if k.startswith("encoder.")
+            }
+            missing_keys, unexpected_keys = encoder.load_state_dict(
+                ckpt_weights, strict=False
+            )
         elif isinstance(ckpt_weights, dict):
             new_ckpt = {}
             for key, value in ckpt_weights.items():
-                if 'aggregator' in key:
-                    new_ckpt[f'backbone.{key}'] = value
-                if 'point_head' in key:
-                    new_ckpt[key.replace('point_head', 'dpt_head')] = value
-            missing_keys, unexpected_keys = encoder.load_state_dict(new_ckpt, strict=False)
+                if "aggregator" in key:
+                    new_ckpt[f"backbone.{key}"] = value
+                if "point_head" in key:
+                    new_ckpt[key.replace("point_head", "dpt_head")] = value
+            missing_keys, unexpected_keys = encoder.load_state_dict(
+                new_ckpt, strict=False
+            )
             del new_ckpt
         else:
             raise ValueError(f"Invalid checkpoint format: {weight_path}")
-        
+
         del ckpt_weights
-
-
 
     model_wrapper = ModelWrapper(
         cfg.optimizer,
@@ -161,7 +173,7 @@ def train(cfg_dict: DictConfig):
         vggt=vggt,
         dino=dino,
         clip=clip,
-        lseg_feature_extractor = lseg_feature_extractor,
+        lseg_feature_extractor=lseg_feature_extractor,
         mode=cfg.mode,
     )
     data_module = DataModule(
