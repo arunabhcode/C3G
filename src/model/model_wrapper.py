@@ -148,6 +148,7 @@ class ModelWrapper(LightningModule):
         dino=None,
         lseg_feature_extractor=None,
         clip=None,
+        sam_encoder=None,
         mode: str = "train",
     ) -> None:
         super().__init__()
@@ -166,6 +167,7 @@ class ModelWrapper(LightningModule):
 
         self.vggt = vggt
         self.lseg_feature_extractor = lseg_feature_extractor
+        self.sam_encoder = sam_encoder
 
         if dino is not None:
             self.dino_model = dino["model"]

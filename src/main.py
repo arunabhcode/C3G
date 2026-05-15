@@ -174,6 +174,7 @@ def train(cfg_dict: DictConfig):
         dino=dino,
         clip=clip,
         lseg_feature_extractor=lseg_feature_extractor,
+        sam_encoder=sam_encoder,
         mode=cfg.mode,
     )
     data_module = DataModule(
