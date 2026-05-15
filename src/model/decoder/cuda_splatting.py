@@ -66,8 +66,12 @@ def render_cuda(
     cam_rot_delta: Float[Tensor, "batch 3"] | None = None,
     cam_trans_delta: Float[Tensor, "batch 3"] | None = None,
     low_pass_filter: float = 0.3,
-    feature_detach: bool = False
-) -> tuple[Float[Tensor, "batch 3 height width"], Float[Tensor, "batch height width"], Float[Tensor, "batch out_feature_dim height width"] | None]:
+    feature_detach: bool = False,
+) -> tuple[
+    Float[Tensor, "batch 3 height width"],
+    Float[Tensor, "batch height width"],
+    Float[Tensor, "batch out_feature_dim height width"] | None,
+]:
     assert use_sh or gaussian_sh_coefficients.shape[-1] == 1
 
     # Make sure everything is in a range where numerical issues don't appear.
@@ -107,8 +111,8 @@ def render_cuda(
             mean_gradients.retain_grad()
         except Exception:
             pass
-        
-        if gaussian_features is None:    
+
+        if gaussian_features is None:
             settings = GaussianRasterizationSettings(
                 image_height=h,
                 image_width=w,
@@ -123,7 +127,7 @@ def render_cuda(
                 campos=extrinsics[i, :3, 3],
                 prefiltered=False,  # This matches the original usage.
                 debug=False,
-                low_pass = low_pass_filter,
+                low_pass=low_pass_filter,
             )
             rasterizer = GaussianRasterizer(settings)
 
@@ -142,7 +146,7 @@ def render_cuda(
             all_images.append(image)
             all_radii.append(radii)
             all_depths.append(depth.squeeze(0))
-            
+
             feature = None
         else:
             settings = FeatureDetachGaussianRasterizationSettings(
@@ -159,7 +163,7 @@ def render_cuda(
                 campos=extrinsics[i, :3, 3],
                 prefiltered=False,  # This matches the original usage.
                 debug=False,
-                low_pass = low_pass_filter,
+                low_pass=low_pass_filter,
             )
             rasterizer = FeatureDetachGaussianRasterizer(settings)
 
@@ -169,7 +173,7 @@ def render_cuda(
                 means3D=gaussian_means[i],
                 means2D=mean_gradients,
                 shs=shs[i] if use_sh else None,
-                semantic_feature = gaussian_features[i],
+                semantic_feature=gaussian_features[i],
                 colors_precomp=None if use_sh else shs[i, :, 0, :],
                 opacities=gaussian_opacities[i, ..., None],
                 cov3D_precomp=gaussian_covariances[i, :, row, col],
@@ -181,7 +185,7 @@ def render_cuda(
             all_depths.append(depth.squeeze(0))
             all_features.append(features)
             feature = torch.stack(all_features)
-                        
+
     return torch.stack(all_images), torch.stack(all_depths), feature
 
 
@@ -200,7 +204,7 @@ def render_cuda_orthographic(
     fov_degrees: float = 0.1,
     use_sh: bool = True,
     dump: dict | None = None,
-    low_pass_filter = 0.3
+    low_pass_filter=0.3,
 ) -> Float[Tensor, "batch 3 height width"]:
     b, _, _ = extrinsics.shape
     h, w = image_shape

@@ -4,8 +4,13 @@ from torch.utils.data import Dataset
 
 from .dataset_scannet_pose import DatasetScannetPose, DatasetScannetPoseCfgWrapper
 from ..misc.step_tracker import StepTracker
-from .dataset_re10k import DatasetRE10k, DatasetRE10kCfg, DatasetRE10kCfgWrapper, DatasetDL3DVCfgWrapper, \
-    DatasetScannetppCfgWrapper
+from .dataset_re10k import (
+    DatasetRE10k,
+    DatasetRE10kCfg,
+    DatasetRE10kCfgWrapper,
+    DatasetDL3DVCfgWrapper,
+    DatasetScannetppCfgWrapper,
+)
 from .dataset_scannet import ScannetCfg, DatasetScannet, DatasetScannetCfgWrapper
 from .dataset_replica import DatasetReplica, ReplicaCfg, DatasetReplicaCfgWrapper
 from .types import Stage
@@ -21,7 +26,14 @@ DATASETS: dict[str, Dataset] = {
 }
 
 
-DatasetCfgWrapper = DatasetRE10kCfgWrapper | DatasetDL3DVCfgWrapper | DatasetScannetppCfgWrapper | DatasetScannetPoseCfgWrapper | DatasetScannetCfgWrapper | DatasetReplicaCfgWrapper
+DatasetCfgWrapper = (
+    DatasetRE10kCfgWrapper
+    | DatasetDL3DVCfgWrapper
+    | DatasetScannetppCfgWrapper
+    | DatasetScannetPoseCfgWrapper
+    | DatasetScannetCfgWrapper
+    | DatasetReplicaCfgWrapper
+)
 DatasetCfg = DatasetRE10kCfg | ScannetCfg | ReplicaCfg
 
 

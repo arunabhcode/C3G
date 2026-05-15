@@ -100,6 +100,8 @@ def load_typed_root_config(cfg: DictConfig) -> RootCfg:
     return load_typed_config(
         cfg,
         RootCfg,
-        {list[LossCfgWrapper]: separate_loss_cfg_wrappers,
-         list[DatasetCfgWrapper]: separate_dataset_cfg_wrappers},
+        {
+            list[LossCfgWrapper]: separate_loss_cfg_wrappers,
+            list[DatasetCfgWrapper]: separate_dataset_cfg_wrappers,
+        },
     )
