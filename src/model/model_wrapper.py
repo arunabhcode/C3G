@@ -52,6 +52,11 @@ from .decoder.decoder import Decoder, DepthRenderingMode
 from .encoder import Encoder
 from .encoder.visualization.encoder_visualizer import EncoderVisualizer
 from .utils import save_segmap, run_pca
+from ..loss.loss_segmentation import (
+    LossSegmentation,
+    LossSegmentationCfg,
+    LossSegmentationCfgWrapper,
+)
 
 
 @dataclass
@@ -109,6 +114,11 @@ class TrainCfg:
     random_select_context_view: bool = False
     reproj_model: str = "none"  # 'vggt' or 'dino'
     feature_rendering_loss: float = 0.0
+    segmentation_loss_weight: float = 0.0
+    sam_model_variant: str = "sam_vit_h"
+    sam_checkpoint: str = ""
+    use_lora: bool = False
+    lora_rank: int = 4
 
 
 @runtime_checkable
@@ -185,6 +195,23 @@ class ModelWrapper(LightningModule):
             self.clip_model = clip["model"]
         else:
             self.clip_model = None
+
+        if (
+            self.train_cfg.segmentation_loss_weight > 0
+            and self.train_cfg.sam_checkpoint
+        ):
+            seg_cfg = LossSegmentationCfgWrapper(
+                segmentation=LossSegmentationCfg(
+                    weight=self.train_cfg.segmentation_loss_weight,
+                    sam_checkpoint=self.train_cfg.sam_checkpoint,
+                    sam_model_variant=self.train_cfg.sam_model_variant,
+                    use_lora=self.train_cfg.use_lora,
+                    lora_rank=self.train_cfg.lora_rank,
+                )
+            )
+            self.segmentation_loss = LossSegmentation(seg_cfg)
+        else:
+            self.segmentation_loss = None
 
         # This is used for testing.
         self.benchmarker = Benchmarker()
@@ -361,6 +388,28 @@ class ModelWrapper(LightningModule):
                 + self.train_cfg.feature_rendering_loss * feature_rendering_loss
             )
 
+        if (
+            self.train_cfg.segmentation_loss_weight > 0
+            and self.segmentation_loss is not None
+        ):
+            gt_masks = batch["target"].get("masks")
+            if gt_masks is not None and output.feature is not None:
+                segmentation_loss = self.segmentation_loss.forward(
+                    output,
+                    batch,
+                    gaussians,
+                    self.global_step,
+                )
+                self.log(
+                    "loss/segmentation",
+                    segmentation_loss,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                )
+                total_loss = total_loss + segmentation_loss
+
         self.log(
             "loss/total",
             total_loss,
@@ -389,7 +438,7 @@ class ModelWrapper(LightningModule):
             on_epoch=True,
             prog_bar=True,
             logger=True,
-        )  # hack for ckpt monitor
+        )
 
         # Tell the data loader processes about the current step.
         if self.step_tracker is not None:
@@ -1401,6 +1450,7 @@ class ModelWrapper(LightningModule):
                 or "intrinsic_encoder" in name
                 or "dpt_gs_head" in name
                 or "gmae" in name
+                or "segmentation_loss" in name
             ):
                 new_params.append(param)
                 new_param_names.append(name)
