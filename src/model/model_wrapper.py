@@ -179,6 +179,8 @@ class ModelWrapper(LightningModule):
         self.lseg_feature_extractor = lseg_feature_extractor
         self.sam_encoder = sam_encoder
 
+        self.validate_sam_config()
+
         if dino is not None:
             self.dino_model = dino["model"]
             self.dino_processor = dino["processor"] if "processor" in dino else None
@@ -229,6 +231,32 @@ class ModelWrapper(LightningModule):
 
         self.per_image_ious = []
         self.per_image_accs = []
+
+    def validate_sam_config(self):
+        """Validate SAM-related configuration at initialization time."""
+        SAM_VARIANTS = {"sam_vit_h", "sam_vit_l", "sam_vit_b"}
+        if not (
+            "sam" in self.train_cfg.reproj_model
+            or self.train_cfg.segmentation_loss_weight > 0
+        ):
+            return
+
+        if self.train_cfg.sam_model_variant not in SAM_VARIANTS:
+            raise ValueError(
+                f"Invalid sam_model_variant '{self.train_cfg.sam_model_variant}'. "
+                f"Supported variants: {SAM_VARIANTS}"
+            )
+
+        if not self.train_cfg.sam_checkpoint:
+            raise ValueError(
+                "sam_checkpoint must be specified when using SAM "
+                "(reproj_model contains 'sam' or segmentation_loss_weight > 0)."
+            )
+        if not os.path.isfile(self.train_cfg.sam_checkpoint):
+            raise FileNotFoundError(
+                f"SAM checkpoint not found at '{checkpoint}'. "
+                f"Please download the SAM weights to this path."
+            )
 
     def training_step(self, batch, batch_idx):
         # combine batch from different dataloaders
