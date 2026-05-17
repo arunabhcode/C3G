@@ -1,0 +1,4 @@
+defaults:
+  - lerf_mask
+
+# Eval preset: no augmentation, all train views as context (capped by max_context_views).

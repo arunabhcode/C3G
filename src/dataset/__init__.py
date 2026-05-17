@@ -13,6 +13,11 @@ from .dataset_re10k import (
 )
 from .dataset_scannet import ScannetCfg, DatasetScannet, DatasetScannetCfgWrapper
 from .dataset_replica import DatasetReplica, ReplicaCfg, DatasetReplicaCfgWrapper
+from .dataset_lerf_mask import (
+    DatasetLerfMask,
+    LerfMaskCfg,
+    DatasetLerfMaskCfgWrapper,
+)
 from .types import Stage
 from .view_sampler import get_view_sampler
 
@@ -23,6 +28,7 @@ DATASETS: dict[str, Dataset] = {
     "scannet_pose": DatasetScannetPose,
     "scannet": DatasetScannet,
     "replica": DatasetReplica,
+    "lerf_mask": DatasetLerfMask,
 }
 
 
@@ -33,8 +39,9 @@ DatasetCfgWrapper = (
     | DatasetScannetPoseCfgWrapper
     | DatasetScannetCfgWrapper
     | DatasetReplicaCfgWrapper
+    | DatasetLerfMaskCfgWrapper
 )
-DatasetCfg = DatasetRE10kCfg | ScannetCfg | ReplicaCfg
+DatasetCfg = DatasetRE10kCfg | ScannetCfg | ReplicaCfg | LerfMaskCfg
 
 
 def get_dataset(

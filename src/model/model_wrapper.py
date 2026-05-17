@@ -23,6 +23,7 @@ import torch.distributed as dist
 from ..dataset.data_module import get_data_shim
 from ..dataset.types import BatchedExample
 from ..evaluation.metrics import compute_lpips, compute_psnr, compute_ssim
+from ..evaluation.lerf_mask_metrics import best_mask_iou
 from ..global_cfg import get_cfg
 from ..loss import Loss
 from ..misc.benchmarker import Benchmarker
@@ -79,6 +80,8 @@ class TestCfg:
     save_compare: bool
     visualize_gaussian_token: int = -1
     forward_vfm: bool = False
+    eval_lerf_mask: bool = False
+    save_lerf_mask_preds: bool = False
     labels: list[str] = field(
         default_factory=lambda: [
             "wall",
@@ -233,6 +236,8 @@ class ModelWrapper(LightningModule):
         self.boundarymIOU = "TODO"
 
         self.per_image_ious = []
+        self.lerf_mask_records: list[dict[str, float | str]] = []
+        self.lerf_mask_summary: dict = {}
         self.per_image_accs = []
         self.per_image_warpmIOUs = []
         self.per_image_boundarymIOUs = []
@@ -595,6 +600,49 @@ class ModelWrapper(LightningModule):
         ## B, V, C, H, W
         return context_feature
 
+    def _run_lerf_mask_eval(
+        self,
+        batch: BatchedExample,
+        output,
+        path: Path,
+    ) -> None:
+        """Compute LERF-Mask IoU / Boundary-IoU from rendered SAM features."""
+        gt_masks = batch["target"].get("masks")
+        if gt_masks is None or output.feature is None or self.segmentation_loss is None:
+            return
+
+        features_flat = rearrange(output.feature, "b v c h w -> (b v) c h w")
+        pred_logits = self.segmentation_loss.mask_decoder(features_flat)
+        pred_masks = pred_logits.sigmoid() > 0.5
+        pred_masks_np = pred_masks.detach().cpu().numpy()
+
+        gt = gt_masks[0, 0].detach().cpu().numpy()
+        iou, biou, best_k = best_mask_iou(pred_masks_np, gt)
+
+        scene = batch["scene"][0] if isinstance(batch["scene"], list) else batch["scene"]
+        prompt = batch.get("mask_prompt", ["unknown"])
+        if isinstance(prompt, list):
+            prompt = prompt[0]
+        test_idx = int(batch["target"]["index"][0, 0].item())
+
+        self.lerf_mask_records.append(
+            {
+                "scene": scene,
+                "prompt": prompt,
+                "test_idx": test_idx,
+                "iou": iou,
+                "biou": biou,
+            }
+        )
+
+        if self.test_cfg.save_lerf_mask_preds:
+            from PIL import Image as PILImage
+
+            pred_dir = path / scene / "test_mask" / str(test_idx)
+            pred_dir.mkdir(parents=True, exist_ok=True)
+            mask_u8 = pred_masks_np[best_k].astype(np.uint8) * 255
+            PILImage.fromarray(mask_u8).save(pred_dir / f"{prompt}.png")
+
     def test_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
 
@@ -685,6 +733,13 @@ class ModelWrapper(LightningModule):
                     (h, w),
                 )
 
+        (scene,) = batch["scene"]
+        name = get_cfg()["wandb"]["name"]
+        path = self.test_cfg.output_path / name
+
+        if self.test_cfg.eval_lerf_mask:
+            self._run_lerf_mask_eval(batch, output, path)
+
         # compute scores
         if self.test_cfg.compute_scores:
             overlap = batch["context"]["overlap"][0]
@@ -707,9 +762,6 @@ class ModelWrapper(LightningModule):
             self.print_preview_metrics(all_metrics, methods, overlap_tag=overlap_tag)
 
         # Save images.
-        (scene,) = batch["scene"]
-        name = get_cfg()["wandb"]["name"]
-        path = self.test_cfg.output_path / name
         if self.test_cfg.save_image:
             for index, color in zip(batch["target"]["index"][0], output.color[0]):
                 save_image(color, path / scene / f"color/{index:0>6}.png")
@@ -969,6 +1021,39 @@ class ModelWrapper(LightningModule):
 
         self.log("test/mIoU", mean_iou, prog_bar=True)
         self.log("test/Acc", mean_acc, prog_bar=True)
+
+        if self.lerf_mask_records:
+            from collections import defaultdict
+
+            iou_by_prompt: dict[str, list[float]] = defaultdict(list)
+            biou_by_prompt: dict[str, list[float]] = defaultdict(list)
+            for rec in self.lerf_mask_records:
+                iou_by_prompt[str(rec["prompt"])].append(float(rec["iou"]))
+                biou_by_prompt[str(rec["prompt"])].append(float(rec["biou"]))
+
+            mean_iou_per_class = {
+                k: float(np.mean(v)) for k, v in iou_by_prompt.items()
+            }
+            mean_biou_per_class = {
+                k: float(np.mean(v)) for k, v in biou_by_prompt.items()
+            }
+            overall_iou = float(np.mean(list(mean_iou_per_class.values())))
+            overall_biou = float(np.mean(list(mean_biou_per_class.values())))
+
+            print("LERF-Mask Mean IoU per class:", mean_iou_per_class)
+            print("LERF-Mask Overall Mean IoU:", overall_iou)
+            print("LERF-Mask Mean Boundary IoU per class:", mean_biou_per_class)
+            print("LERF-Mask Overall Boundary Mean IoU:", overall_biou)
+
+            self.log("test/lerf_mask_iou", overall_iou, prog_bar=True)
+            self.log("test/lerf_mask_biou", overall_biou, prog_bar=True)
+            self.lerf_mask_summary = {
+                "mean_iou_per_class": mean_iou_per_class,
+                "overall_mean_iou": overall_iou,
+                "mean_biou_per_class": mean_biou_per_class,
+                "overall_mean_biou": overall_biou,
+            }
+            self.lerf_mask_records.clear()
 
         # Reset lists for next epoch
         self.per_image_ious.clear()
