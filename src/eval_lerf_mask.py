@@ -25,14 +25,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from einops import rearrange
 from PIL import Image
-from tqdm import tqdm
 
 from src.dataset.lerf_mask_io import LERF_MASK_SCENES, list_mask_prompts, load_binary_mask
-from src.evaluation.lerf_mask_metrics import best_mask_iou, boundary_iou, calculate_iou
+from src.evaluation.mask_metrics import best_multimask_scores
 from src.model.sam import forward as sam_forward, load_sam
-from src.model.sam_decoder import SAMMaskDecoderWrapper
 
 
 def _aggregate_scores(
@@ -43,12 +40,20 @@ def _aggregate_scores(
     return {"per_class": per_class, "overall": overall}
 
 
-def _print_results(title: str, iou_result: dict, biou_result: dict) -> None:
+def _print_results(
+    title: str,
+    iou_result: dict,
+    boundary_result: dict,
+    warp_result: dict | None = None,
+) -> None:
     print(f"\n=== {title} ===")
     print("Mean IoU per class:", iou_result["per_class"])
     print("Overall Mean IoU:", iou_result["overall"])
-    print("Mean Boundary IoU per class:", biou_result["per_class"])
-    print("Overall Boundary Mean IoU:", biou_result["overall"])
+    print("Mean boundary mIoU per class:", boundary_result["per_class"])
+    print("Overall boundary mIoU:", boundary_result["overall"])
+    if warp_result is not None:
+        print("Mean warp mIoU per class:", warp_result["per_class"])
+        print("Overall warp mIoU:", warp_result["overall"])
 
 
 @torch.no_grad()
@@ -64,7 +69,8 @@ def eval_vanilla_sam(
     sam = load_sam(sam_variant, sam_checkpoint, freeze=True).to(device).eval()
 
     iou_scores: dict[str, list[float]] = defaultdict(list)
-    biou_scores: dict[str, list[float]] = defaultdict(list)
+    boundary_scores: dict[str, list[float]] = defaultdict(list)
+    warp_scores: dict[str, list[float]] = defaultdict(list)
 
     for scene in scenes:
         scene_root = data_root / scene
@@ -102,21 +108,27 @@ def eval_vanilla_sam(
                 if not mask_path.is_file():
                     continue
                 gt = load_binary_mask(mask_path)
-                iou, biou, _ = best_mask_iou(pred_masks, gt)
-                iou_scores[prompt].append(iou)
-                biou_scores[prompt].append(biou)
+                scores = best_multimask_scores(pred_masks, gt)
+                iou_scores[prompt].append(scores.iou)
+                boundary_scores[prompt].append(scores.boundary_iou)
+                # Warp mIoU (pred vs other pred): not run until warp_mask_to_pose is implemented.
+                # See ModelWrapper.compute_warp_mask_miou and mask_metrics.warp_mask_iou.
 
                 if output_dir is not None:
                     out_path = (
                         output_dir / scene / str(test_idx) / f"{prompt}.png"
                     )
                     out_path.parent.mkdir(parents=True, exist_ok=True)
-                    best_mask = pred_masks[
-                        int(np.argmax([calculate_iou(gt, p) for p in pred_masks]))
-                    ]
+                    best_mask = pred_masks[scores.best_index]
                     Image.fromarray((best_mask.astype(np.uint8) * 255)).save(out_path)
 
-    _print_results("Vanilla SAM", _aggregate_scores(iou_scores), _aggregate_scores(biou_scores))
+    warp_agg = _aggregate_scores(warp_scores) if warp_scores else None
+    _print_results(
+        "Vanilla SAM",
+        _aggregate_scores(iou_scores),
+        _aggregate_scores(boundary_scores),
+        warp_agg,
+    )
 
 
 def eval_c3g_sam(
