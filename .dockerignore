@@ -1,0 +1,8 @@
+.venv
+.git
+__pycache__
+*.pyc
+outputs
+wandb
+data
+pretrained_weights
