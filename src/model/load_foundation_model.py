@@ -1,49 +1,13 @@
-import os
 import torch
 from torchvision.transforms import CenterCrop, Compose
 
+from src.model.sam.loader import load_sam_encoder
 
 DINOV3_MODELS = {
     "dinov3_L": ("facebook/dinov3-vitl16-pretrain-lvd1689m", 1024),
     "dinov3_H": ("facebook/dinov3-vith16plus-pretrain-lvd1689m", 1280),
     "dinov3_7B": ("facebook/dinov3-vit7b16-pretrain-lvd1689m", 4096),
 }
-
-SAM_MODELS = {
-    "sam_vit_h": "vit_h",
-    "sam_vit_l": "vit_l",
-    "sam_vit_b": "vit_b",
-}
-
-
-def load_sam_encoder(model_variant, checkpoint_path):
-    """
-    Load frozen SAM image encoder.
-    """
-    from segment_anything import sam_model_registry
-
-    if model_variant not in SAM_MODELS:
-        raise ValueError(
-            f"Unsupported SAM model variant '{model_variant}'. "
-            f"Supported variants: {list(SAM_MODELS.keys())}"
-        )
-
-    if not os.path.isfile(checkpoint_path):
-        raise FileNotFoundError(
-            f"SAM checkpoint not found at '{checkpoint_path}'. "
-            f"Please download the SAM weights to this path."
-        )
-
-    sam_type = SAM_MODELS[model_variant]
-    sam = sam_model_registry[sam_type](checkpoint=checkpoint_path)
-    sam_encoder = sam.image_encoder
-
-    # Freeze all encoder parameters
-    for param in sam_encoder.parameters():
-        param.requires_grad = False
-
-    feature_dim = 256
-    return sam_encoder, feature_dim
 
 
 def load_foundation_model(cfg):

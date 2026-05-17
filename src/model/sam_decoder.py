@@ -1,24 +1,18 @@
-from __future__ import annotations
+"""C3G SAM mask decoder wrapper (precomputed 64x64 embeddings, not full vanilla SAM)."""
 
-import os
+from __future__ import annotations
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from segment_anything import sam_model_registry
-
-SAM_MODELS = {
-    "sam_vit_h": "vit_h",
-    "sam_vit_l": "vit_l",
-    "sam_vit_b": "vit_b",
-}
-
-GRID_SIZE = 8
+from src.model.sam.constants import GRID_SIZE, SAM_MODELS
+from src.model.sam.loader import load_sam
+from src.model.sam.preprocess import generate_grid_points
 
 
 class SAMMaskDecoderWrapper(nn.Module):
-    """Wraps SAM's mask decoder to accept rendered Gaussian features."""
+    """Wraps SAM's mask decoder to accept rendered Gaussian features (Bx256x64x64)."""
 
     def __init__(
         self, sam_checkpoint, model_variant="sam_vit_h", use_lora=False, lora_rank=4
@@ -30,22 +24,10 @@ class SAMMaskDecoderWrapper(nn.Module):
                 f"Unsupported SAM model variant '{model_variant}'. "
                 f"Supported: {list(SAM_MODELS.keys())}"
             )
-        if not os.path.isfile(sam_checkpoint):
-            raise FileNotFoundError(
-                f"SAM checkpoint not found at '{sam_checkpoint}'. "
-                f"Please download the SAM weights to this path."
-            )
 
-        sam_type = SAM_MODELS[model_variant]
-        sam = sam_model_registry[sam_type](checkpoint=sam_checkpoint)
-
+        sam = load_sam(model_variant, sam_checkpoint, freeze=True)
         self.mask_decoder = sam.mask_decoder
         self.prompt_encoder = sam.prompt_encoder
-
-        for param in self.mask_decoder.parameters():
-            param.requires_grad = False
-        for param in self.prompt_encoder.parameters():
-            param.requires_grad = False
 
         self.use_lora = use_lora
         if use_lora:
@@ -55,24 +37,12 @@ class SAMMaskDecoderWrapper(nn.Module):
         """Inject LoRA on v_proj layers in token-to-image cross-attention."""
         from src.model.lora import inject_lora
 
-        for i, layer in enumerate(self.mask_decoder.transformer.layers):
+        for layer in self.mask_decoder.transformer.layers:
             inject_lora(layer, "cross_attn_token_to_image.v_proj", rank=rank)
 
         inject_lora(
             self.mask_decoder.transformer, "final_attn_token_to_image.v_proj", rank=rank
         )
-
-    def generate_grid_points(self, batch_size, device):
-        """Generate evenly-spaced grid points for segment-everything mode."""
-        step = 1024 // GRID_SIZE
-        offset = step // 2
-        coords_h = torch.arange(offset, 1024, step, device=device, dtype=torch.float32)
-        coords_w = torch.arange(offset, 1024, step, device=device, dtype=torch.float32)
-        grid_y, grid_x = torch.meshgrid(coords_h, coords_w, indexing="ij")
-        points = torch.stack([grid_x.flatten(), grid_y.flatten()], dim=-1)
-        points = points.unsqueeze(0).expand(batch_size, -1, -1)
-        labels = torch.ones(batch_size, points.shape[1], device=device, dtype=torch.int)
-        return points, labels
 
     def forward(
         self, rendered_features, point_coords=None, point_labels=None, box=None
@@ -100,8 +70,8 @@ class SAMMaskDecoderWrapper(nn.Module):
                     points=pts, boxes=bx, masks=None
                 )
             else:
-                grid_pts, grid_labels = self.generate_grid_points(
-                    1, rendered_features.device
+                grid_pts, grid_labels = generate_grid_points(
+                    1, rendered_features.device, grid_size=GRID_SIZE
                 )
                 sparse_emb, dense_emb = self.prompt_encoder(
                     points=(grid_pts, grid_labels), boxes=None, masks=None

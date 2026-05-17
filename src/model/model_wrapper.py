@@ -229,8 +229,13 @@ class ModelWrapper(LightningModule):
             ignore_index=0,
         )
 
+        self.warpmIOU = "TODO"
+        self.boundarymIOU = "TODO"
+
         self.per_image_ious = []
         self.per_image_accs = []
+        self.per_image_warpmIOUs = []
+        self.per_image_boundarymIOUs = []
 
     def validate_sam_config(self):
         """Validate SAM-related configuration at initialization time."""
