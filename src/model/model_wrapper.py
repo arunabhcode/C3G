@@ -198,9 +198,9 @@ class ModelWrapper(LightningModule):
         else:
             self.clip_model = None
 
-        if (
+        if self.train_cfg.sam_checkpoint and (
             self.train_cfg.segmentation_loss_weight > 0
-            and self.train_cfg.sam_checkpoint
+            or "sam" in self.train_cfg.reproj_model
         ):
             seg_cfg = LossSegmentationCfgWrapper(
                 segmentation=LossSegmentationCfg(
@@ -254,9 +254,41 @@ class ModelWrapper(LightningModule):
             )
         if not os.path.isfile(self.train_cfg.sam_checkpoint):
             raise FileNotFoundError(
-                f"SAM checkpoint not found at '{checkpoint}'. "
+                f"SAM checkpoint not found at '{self.train_cfg.sam_checkpoint}'. "
                 f"Please download the SAM weights to this path."
             )
+
+    def compute_sam_mask_miou(
+        self,
+        rendered_features: Float[Tensor, "batch view feature_dim height width"],
+        gt_masks: Tensor,
+    ) -> Tensor:
+        """Compute binary mIoU from SAM masks decoded from rendered features."""
+        if self.segmentation_loss is None:
+            raise RuntimeError("SAM segmentation loss must be initialized.")
+
+        if gt_masks.dim() == 5:
+            gt_masks = gt_masks.squeeze(2)
+
+        features_flat = rearrange(rendered_features, "b v c h w -> (b v) c h w")
+        pred_masks = self.segmentation_loss.mask_decoder(features_flat)
+
+        target_masks = rearrange(gt_masks, "b v h w -> (b v) 1 h w").bool()
+        if pred_masks.shape[-2:] != target_masks.shape[-2:]:
+            pred_masks = F.interpolate(
+                pred_masks,
+                size=target_masks.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        pred_masks = pred_masks.sigmoid() > 0.5
+        intersection = (pred_masks & target_masks).sum(dim=(-2, -1)).float()
+        union = (pred_masks | target_masks).sum(dim=(-2, -1)).float()
+        ious = torch.where(union > 0, intersection / union, torch.ones_like(union))
+
+        # SAM can return multiple masks per prompt; score each image by its best mask.
+        return ious.max(dim=1).values.mean()
 
     def training_step(self, batch, batch_idx):
         # combine batch from different dataloaders
@@ -1123,6 +1155,22 @@ class ModelWrapper(LightningModule):
         self.log(f"val/psnr", psnr)
         self.log(f"val/lpips", lpips)
         self.log(f"val/ssim", ssim)
+
+        gt_masks = batch["target"]["masks"]
+        if (
+            self.segmentation_loss is not None
+            and output.feature is not None
+            and gt_masks is not None
+        ):
+            sam_miou = self.compute_sam_mask_miou(output.feature, gt_masks)
+            self.log(
+                "val/sam_miou",
+                sam_miou,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+            )
 
         # Construct comparison image.
         context_img = inverse_normalize(batch["context"]["image"][0])
