@@ -1,5 +1,7 @@
 # @package _global_
-# LERF-Mask mask segmentation eval (images + masks + COLMAP poses).
+# LERF-Mask mask segmentation eval (test only; not a training dataset).
+
+mode: test
 
 defaults:
   - /dataset@_group_.lerf_mask_eval: lerf_mask_eval

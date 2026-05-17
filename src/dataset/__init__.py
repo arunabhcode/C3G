@@ -54,6 +54,11 @@ def get_dataset(
         (field,) = fields(type(cfg))
         cfg = getattr(cfg, field.name)
 
+        if cfg.name == "lerf_mask" and stage != "test":
+            raise ValueError(
+                "LERF-Mask is evaluation-only. Use mode=test with +evaluation=lerf_mask."
+            )
+
         view_sampler = get_view_sampler(
             cfg.view_sampler,
             stage,

@@ -1,5 +1,5 @@
 """
-LERF-Mask evaluation: vanilla SAM (image-only) and C3G+SAM (rendered features).
+LERF-Mask evaluation only (not used for training).
 
 Dataset: https://huggingface.co/mqye/Gaussian-Grouping/tree/main/data/lerf_mask
 

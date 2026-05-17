@@ -1,4 +1,7 @@
-"""COLMAP I/O and train/test split for the LERF-Mask benchmark (Gaussian-Grouping layout)."""
+"""COLMAP I/O for the LERF-Mask *evaluation* benchmark (Gaussian-Grouping layout).
+
+Train views are context only; metrics run on held-out test views in test_mask/.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""LERF-Mask: images, binary masks, and COLMAP camera poses for mask segmentation eval."""
+"""LERF-Mask benchmark loader (evaluation / test only).
+
+Not for training. Use via ``+evaluation=lerf_mask`` with ``mode=test``, or
+``python -m src.eval_lerf_mask``.
+"""
 
 from __future__ import annotations
 
@@ -44,12 +48,18 @@ class LerfMaskCfg(DatasetCfgCommon):
 
 @dataclass
 class DatasetLerfMaskCfgWrapper:
-    lerf_mask: LerfMaskCfg
+    """Hydra wrapper; only ``lerf_mask_eval`` is supported (no training preset)."""
+
     lerf_mask_eval: LerfMaskCfg
 
 
 class DatasetLerfMask(IterableDataset):
-    """Yield one (scene, test view, text prompt) example with context train views."""
+    """Eval-only: one (scene, test view, text prompt) with context train views."""
+
+    _EVAL_ONLY_MSG = (
+        "LERF-Mask is evaluation-only. Use mode=test with +evaluation=lerf_mask, "
+        "or: python -m src.eval_lerf_mask"
+    )
 
     cfg: LerfMaskCfg
     stage: Stage
@@ -65,6 +75,8 @@ class DatasetLerfMask(IterableDataset):
         view_sampler: ViewSampler,
     ) -> None:
         super().__init__()
+        if stage != "test":
+            raise ValueError(self._EVAL_ONLY_MSG)
         self.cfg = cfg
         self.stage = stage
         self.view_sampler = view_sampler
@@ -96,9 +108,11 @@ class DatasetLerfMask(IterableDataset):
         return value
 
     def __iter__(self):
+        if self.stage != "test":
+            raise ValueError(self._EVAL_ONLY_MSG)
         worker_info = torch.utils.data.get_worker_info()
         scene_list = self.scene_list
-        if self.stage == "test" and worker_info is not None:
+        if worker_info is not None:
             scene_list = [
                 s
                 for i, s in enumerate(scene_list)
