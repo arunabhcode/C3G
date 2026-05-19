@@ -525,7 +525,7 @@ class ModelWrapper(LightningModule):
             depth_mode=self.train_cfg.depth_mode,
             global_step=self.global_step,
         )
-        output = self._clamp_rendered_features(output)
+        output = self.clamp_rendered_features(output)
 
         target_gt = torch.cat(
             [batch["target"]["image"], ((batch["context"]["image"] + 1) / 2)], dim=1
