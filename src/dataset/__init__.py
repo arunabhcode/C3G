@@ -3,6 +3,11 @@ from dataclasses import fields
 from torch.utils.data import Dataset
 
 from .dataset_scannet_pose import DatasetScannetPose, DatasetScannetPoseCfgWrapper
+from .dataset_replica_pose import (
+    DatasetReplicaPose,
+    DatasetReplicaPoseCfg,
+    DatasetReplicaPoseCfgWrapper,
+)
 from ..misc.step_tracker import StepTracker
 from .dataset_re10k import (
     DatasetRE10k,
@@ -28,6 +33,7 @@ DATASETS: dict[str, Dataset] = {
     "scannet_pose": DatasetScannetPose,
     "scannet": DatasetScannet,
     "replica": DatasetReplica,
+    "replica_pose": DatasetReplicaPose,
     "lerf_mask": DatasetLerfMask,
 }
 
@@ -39,9 +45,12 @@ DatasetCfgWrapper = (
     | DatasetScannetPoseCfgWrapper
     | DatasetScannetCfgWrapper
     | DatasetReplicaCfgWrapper
+    | DatasetReplicaPoseCfgWrapper
     | DatasetLerfMaskCfgWrapper
 )
-DatasetCfg = DatasetRE10kCfg | ScannetCfg | ReplicaCfg | LerfMaskCfg
+DatasetCfg = (
+    DatasetRE10kCfg | ScannetCfg | ReplicaCfg | DatasetReplicaPoseCfg | LerfMaskCfg
+)
 
 
 def get_dataset(
