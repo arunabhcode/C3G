@@ -126,6 +126,10 @@ class TrainCfg:
     sam_checkpoint: str = ""
     use_lora: bool = False
     lora_rank: int = 4
+    prompt_mode: str = "grid"
+    prompted_seg_loss_weight: float = 1.0
+    prompt_strategy: str = "centroid"
+    min_object_pixels: int = 16
 
 
 @runtime_checkable
@@ -270,6 +274,20 @@ class ModelWrapper(LightningModule):
             raise FileNotFoundError(
                 f"SAM checkpoint not found at '{self.train_cfg.sam_checkpoint}'. "
                 f"Please download the SAM weights to this path."
+            )
+
+        PROMPT_MODES = {"grid", "prompted"}
+        if self.train_cfg.prompt_mode not in PROMPT_MODES:
+            raise ValueError(
+                f"Invalid prompt_mode '{self.train_cfg.prompt_mode}'. "
+                f"Supported modes: {PROMPT_MODES}"
+            )
+
+        PROMPT_STRATEGIES = {"centroid", "random_point"}
+        if self.train_cfg.prompt_strategy not in PROMPT_STRATEGIES:
+            raise ValueError(
+                f"Invalid prompt_strategy '{self.train_cfg.prompt_strategy}'. "
+                f"Supported strategies: {PROMPT_STRATEGIES}"
             )
 
     def clamp_rendered_features(self, output):
