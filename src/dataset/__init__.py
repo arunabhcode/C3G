@@ -8,6 +8,11 @@ from .dataset_replica_pose import (
     DatasetReplicaPoseCfg,
     DatasetReplicaPoseCfgWrapper,
 )
+from .dataset_replica_2dseg import (
+    DatasetReplica2dSeg,
+    Replica2dSegCfg,
+    DatasetReplica2dSegCfgWrapper,
+)
 from ..misc.step_tracker import StepTracker
 from .dataset_re10k import (
     DatasetRE10k,
@@ -17,6 +22,11 @@ from .dataset_re10k import (
     DatasetScannetppCfgWrapper,
 )
 from .dataset_scannet import ScannetCfg, DatasetScannet, DatasetScannetCfgWrapper
+from .dataset_scannet_2dseg import (
+    DatasetScannet2dSeg,
+    Scannet2dSegCfg,
+    DatasetScannet2dSegCfgWrapper,
+)
 from .dataset_replica import DatasetReplica, ReplicaCfg, DatasetReplicaCfgWrapper
 from .dataset_lerf_mask import (
     DatasetLerfMask,
@@ -32,8 +42,10 @@ DATASETS: dict[str, Dataset] = {
     "scannetpp": DatasetRE10k,
     "scannet_pose": DatasetScannetPose,
     "scannet": DatasetScannet,
+    "scannet_2dseg": DatasetScannet2dSeg,
     "replica": DatasetReplica,
     "replica_pose": DatasetReplicaPose,
+    "replica_2dseg": DatasetReplica2dSeg,
     "lerf_mask": DatasetLerfMask,
 }
 
@@ -44,12 +56,20 @@ DatasetCfgWrapper = (
     | DatasetScannetppCfgWrapper
     | DatasetScannetPoseCfgWrapper
     | DatasetScannetCfgWrapper
+    | DatasetScannet2dSegCfgWrapper
     | DatasetReplicaCfgWrapper
     | DatasetReplicaPoseCfgWrapper
+    | DatasetReplica2dSegCfgWrapper
     | DatasetLerfMaskCfgWrapper
 )
 DatasetCfg = (
-    DatasetRE10kCfg | ScannetCfg | ReplicaCfg | DatasetReplicaPoseCfg | LerfMaskCfg
+    DatasetRE10kCfg
+    | ScannetCfg
+    | Scannet2dSegCfg
+    | ReplicaCfg
+    | DatasetReplicaPoseCfg
+    | Replica2dSegCfg
+    | LerfMaskCfg
 )
 
 

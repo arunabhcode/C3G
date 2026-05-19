@@ -19,6 +19,7 @@ import numpy as np
 
 from ..geometry.projection import get_fov
 from .dataset import DatasetCfgCommon
+from .frame_layout import FramePaths
 from .shims.augmentation_shim import apply_augmentation_shim
 from .shims.crop_shim import apply_crop_shim
 from .types import Stage
@@ -268,21 +269,12 @@ class DatasetScannet(IterableDataset):
                 label_list = []
 
                 for idx in idxs:
-                    impath = os.path.join(
-                        self.cfg.roots[0],
-                        scene_id,
-                        "images",
-                        f"{self.scenes[scene_id][idx]}.jpg",
-                    )
-                    meta_data_path = impath.replace("jpg", "npz")
-                    depthmap_path = impath.replace("jpg", "png").replace(
-                        "images", "depths"
-                    )
-                    label_path = impath.replace("jpg", "png").replace(
-                        "images", "labels"
+                    frame_id = self.scenes[scene_id][idx]
+                    paths = FramePaths.from_frame_id(
+                        Path(self.cfg.roots[0]) / scene_id, frame_id
                     )
 
-                    input_metadata = np.load(meta_data_path)
+                    input_metadata = np.load(paths.camera)
                     camera_pose = input_metadata["camera_pose"].astype(np.float32)
                     has_inf = np.any(np.isinf(camera_pose))
                     if has_inf:
@@ -292,10 +284,10 @@ class DatasetScannet(IterableDataset):
                     intrinsics = input_metadata["camera_intrinsics"].astype(np.float32)
                     ## normalize it
 
-                    rgb_image = imread_cv2(impath)
-                    depthmap = imread_cv2(depthmap_path, options=cv2.IMREAD_UNCHANGED)
+                    rgb_image = imread_cv2(str(paths.image))
+                    labelmap = imread_cv2(str(paths.label), options=cv2.IMREAD_UNCHANGED)
+                    depthmap = np.ones(labelmap.shape[:2], dtype=np.uint16)
                     maskmap = np.ones_like(depthmap) * 255
-                    labelmap = imread_cv2(label_path, options=cv2.IMREAD_UNCHANGED)
 
                     depth_mask_map = np.stack([depthmap, maskmap, labelmap], axis=-1)
 
@@ -305,7 +297,7 @@ class DatasetScannet(IterableDataset):
                             depth_mask_map,
                             intrinsics,
                             self.cfg.input_image_shape,
-                            info=impath,
+                            info=str(paths.image),
                         )
                     )
 

@@ -1,3 +1,7 @@
+"""Replica relative-pose evaluation loader (``pose/`` layout)."""
+
+from __future__ import annotations
+
 import os
 import os.path as osp
 from dataclasses import dataclass
