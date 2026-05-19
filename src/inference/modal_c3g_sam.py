@@ -13,6 +13,10 @@ Run a remote smoke test::
 
     modal run src/inference/modal_c3g_sam.py --smoke-test
 
+Run detached::
+
+    modal run --detach src/inference/modal_c3g_sam.py --smoke-test
+
 Upload SAM weights to the Modal volume (once)::
 
     modal volume put c3g-weights sam_vit_h.pth /path/to/sam_vit_h.pth
@@ -216,7 +220,9 @@ try:
             return api
 
     @app.local_entrypoint()
-    def modal_main(smoke_test: bool = False) -> None:
+    def modal_main(smoke_test: bool = False, detach: bool = False) -> None:
+        from src.misc.modal_run import dispatch_remote
+
         if not smoke_test:
             print("Pass --smoke-test to run a remote decode on random Bx256x64x64 features.")
             return
@@ -228,7 +234,15 @@ try:
             "shape": [1, 256, 64, 64],
             "dtype": "float32",
         }
-        result = C3GSAMPipeline().decode.remote(payload)
+        result = dispatch_remote(
+            C3GSAMPipeline().decode,
+            payload,
+            detach=detach,
+            job_name="C3G SAM decode",
+            app_name=APP_NAME,
+        )
+        if detach:
+            return
         print("OK — logits shape", result["logits"]["shape"])
 
 except ImportError:

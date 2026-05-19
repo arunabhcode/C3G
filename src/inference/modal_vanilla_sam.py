@@ -9,6 +9,10 @@ Run a remote smoke test::
 
     modal run src/inference/modal_vanilla_sam.py --image-path path/to.jpg --segment-everything
 
+Run detached (returns immediately)::
+
+    modal run --detach src/inference/modal_vanilla_sam.py --image-path path/to.jpg
+
 Upload SAM weights to the Modal volume (once)::
 
     modal volume put c3g-weights sam_vit_h.pth /path/to/sam_vit_h.pth
@@ -234,7 +238,10 @@ try:
     def modal_main(
         image_path: str,
         segment_everything: bool = False,
+        detach: bool = False,
     ) -> None:
+        from src.misc.modal_run import dispatch_remote
+
         image_file = Path(image_path)
         if not image_file.is_file():
             print(f"Image not found: {image_file}", file=sys.stderr)
@@ -245,7 +252,15 @@ try:
             "segment_everything": segment_everything,
             "multimask_output": True,
         }
-        result = VanillaSAMInference().predict.remote(payload)
+        result = dispatch_remote(
+            VanillaSAMInference().predict,
+            payload,
+            detach=detach,
+            job_name="vanilla SAM predict",
+            app_name=APP_NAME,
+        )
+        if detach:
+            return
         print(f"OK — masks shape {result['masks']['shape']}")
         print(f"IoU heads: {result['iou_predictions']}")
 

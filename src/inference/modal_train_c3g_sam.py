@@ -16,10 +16,13 @@ Prerequisites on Modal volumes::
     modal volume put replica office0_x.jpg /replica/office0/...  # or populate via:
     modal run src/dataset/replica_data/download_replica.py
 
-Run training::
+Run training (blocking)::
 
-    modal run --detach src/inference/modal_train_c3g_sam.py \\
-        --run-name replica_sam_run1
+    modal run src/inference/modal_train_c3g_sam.py --run-name replica_sam_run1
+
+Run detached::
+
+    modal run --detach src/inference/modal_train_c3g_sam.py --run-name replica_sam_run1
 
 Resume from a checkpoint on the output volume::
 
@@ -231,8 +234,12 @@ try:
         dataset_root: str | None = None,
         val_interval: int = 1000,
         batch_size: int = 2,
+        detach: bool = False,
     ) -> None:
-        run_dir = train_c3g_sam_feature.remote(
+        from src.misc.modal_run import dispatch_remote
+
+        result = dispatch_remote(
+            train_c3g_sam_feature,
             run_name=run_name,
             max_steps=max_steps,
             wandb_mode=wandb_mode,
@@ -242,8 +249,13 @@ try:
             dataset_root=dataset_root,
             val_interval=val_interval,
             batch_size=batch_size,
+            detach=detach,
+            job_name=f"C3G-F SAM training ({run_name})",
+            app_name=APP_NAME,
         )
-        print(f"Remote run finished: {run_dir}")
+        if detach:
+            return
+        print(f"Remote run finished: {result}")
 
 except ImportError:
     app = None  # type: ignore[assignment]
