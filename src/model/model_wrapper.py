@@ -764,6 +764,11 @@ class ModelWrapper(LightningModule):
     ) -> None:
         """Compute LERF-Mask IoU / boundary mIoU (pred vs GT) from rendered SAM features."""
         gt_masks = batch["target"].get("masks")
+        if gt_masks is None and batch["target"].get("label") is not None:
+            label_maps = batch["target"]["label"]
+            gt_masks = (label_maps > 0).float()
+            if gt_masks.dim() == 3:
+                gt_masks = gt_masks.unsqueeze(1)
         if (
             gt_masks is None
             or output.feature is None
@@ -1441,6 +1446,11 @@ class ModelWrapper(LightningModule):
         self.log(f"val/ssim", ssim)
 
         gt_masks = batch["target"].get("masks")
+        if gt_masks is None and batch["target"].get("label") is not None:
+            label_maps = batch["target"]["label"]
+            gt_masks = (label_maps > 0).float()
+            if gt_masks.dim() == 3:
+                gt_masks = gt_masks.unsqueeze(1)
         if (
             self.prompted_segmentation_loss is not None
             and output.feature is not None
