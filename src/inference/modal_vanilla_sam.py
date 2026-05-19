@@ -5,13 +5,17 @@ Deploy the HTTP endpoint::
 
     modal deploy src/inference/modal_vanilla_sam.py
 
-Run a remote smoke test::
+Run a remote smoke test on one dataset frame (Replica or ScanNet 2dseg volume)::
 
-    modal run src/inference/modal_vanilla_sam.py --image-path path/to.jpg --segment-everything
+    modal run src/inference/modal_vanilla_sam.py --smoke-test --dataset replica
 
-Run detached (returns immediately)::
+Run with a local image file::
 
-    modal run --detach src/inference/modal_vanilla_sam.py --image-path path/to.jpg
+    modal run src/inference/modal_vanilla_sam.py --image-path path/to.jpg
+
+Run detached::
+
+    modal run --detach src/inference/modal_vanilla_sam.py --smoke-test --dataset scannet
 
 Upload SAM weights to the Modal volume (once)::
 
@@ -32,10 +36,21 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
 
+from src.inference.modal_sam_common import (
+    DATASET_SPECS,
+    DEFAULT_SAM_CHECKPOINT,
+    REPLICA_MOUNT,
+    REPLICA_VOLUME,
+    SCANNET_MOUNT,
+    SCANNET_VOLUME,
+    WEIGHTS_MOUNT,
+    WEIGHTS_VOLUME,
+    DatasetName,
+    find_smoke_frame,
+    resolve_dataset_root,
+)
+
 APP_NAME = "c3g-vanilla-sam"
-WEIGHTS_VOLUME = "c3g-weights"
-WEIGHTS_MOUNT = Path("/weights")
-DEFAULT_CHECKPOINT = WEIGHTS_MOUNT / "sam_vit_h.pth"
 DEFAULT_VARIANT = "sam_vit_h"
 
 
@@ -160,6 +175,13 @@ def _run_vanilla_sam_predict(
     return response
 
 
+def _load_smoke_image_bytes(dataset: DatasetName, dataset_root: str | None) -> tuple[bytes, str]:
+    root = resolve_dataset_root(dataset, dataset_root)
+    scene_id, paths = find_smoke_frame(root)
+    summary = f"{dataset} scene={scene_id} frame={paths.frame_id} ({paths.image.name})"
+    return paths.image.read_bytes(), summary
+
+
 # ---------------------------------------------------------------------------
 # Modal entrypoint
 # ---------------------------------------------------------------------------
@@ -169,12 +191,18 @@ try:
 
     app = modal.App(APP_NAME)
     weights_volume = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
+    replica_volume = modal.Volume.from_name(REPLICA_VOLUME, create_if_missing=True)
+    scannet_volume = modal.Volume.from_name(SCANNET_VOLUME, create_if_missing=True)
     inference_image = _build_image()
 
     @app.cls(
         image=inference_image,
         gpu="A10G",
-        volumes={str(WEIGHTS_MOUNT): weights_volume},
+        volumes={
+            str(WEIGHTS_MOUNT): weights_volume,
+            str(REPLICA_MOUNT): replica_volume,
+            str(SCANNET_MOUNT): scannet_volume,
+        },
         timeout=60 * 30,
         scaledown_window=300,
     )
@@ -187,7 +215,7 @@ try:
 
             from src.model.sam import load_sam
 
-            checkpoint_path = str(DEFAULT_CHECKPOINT)
+            checkpoint_path = str(DEFAULT_SAM_CHECKPOINT)
             if not Path(checkpoint_path).is_file():
                 raise FileNotFoundError(
                     f"SAM checkpoint not found at {checkpoint_path}. "
@@ -205,6 +233,24 @@ try:
         @modal.method()
         def predict(self, payload: dict[str, Any]) -> dict[str, Any]:
             return _run_vanilla_sam_predict(self.sam, self.device, payload)
+
+        @modal.method()
+        def predict_smoke_frame(
+            self,
+            dataset: DatasetName = "replica",
+            dataset_root: str | None = None,
+            segment_everything: bool = False,
+        ) -> dict[str, Any]:
+            image_bytes, summary = _load_smoke_image_bytes(dataset, dataset_root)
+            print(f"Smoke test image: {summary}")
+            payload = {
+                "images_b64": [base64.b64encode(image_bytes).decode("ascii")],
+                "segment_everything": segment_everything,
+                "multimask_output": True,
+            }
+            result = _run_vanilla_sam_predict(self.sam, self.device, payload)
+            result["smoke_frame"] = summary
+            return result
 
         @modal.fastapi_endpoint(method="POST", docs=True)
         def web(self):
@@ -236,33 +282,65 @@ try:
 
     @app.local_entrypoint()
     def modal_main(
-        image_path: str,
+        image_path: str | None = None,
+        dataset: DatasetName = "replica",
+        dataset_root: str | None = None,
         segment_everything: bool = False,
+        smoke_test: bool = False,
         detach: bool = False,
     ) -> None:
         from src.misc.modal_run import dispatch_remote
 
-        image_file = Path(image_path)
-        if not image_file.is_file():
-            print(f"Image not found: {image_file}", file=sys.stderr)
-            sys.exit(1)
+        if dataset not in DATASET_SPECS:
+            print(
+                f"Unknown dataset {dataset!r}; choose one of: {', '.join(DATASET_SPECS)}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
 
-        payload = {
-            "images_b64": [base64.b64encode(image_file.read_bytes()).decode("ascii")],
-            "segment_everything": segment_everything,
-            "multimask_output": True,
-        }
-        result = dispatch_remote(
-            VanillaSAMInference().predict,
-            payload,
-            detach=detach,
-            job_name="vanilla SAM predict",
-            app_name=APP_NAME,
-        )
+        if smoke_test:
+            result = dispatch_remote(
+                VanillaSAMInference().predict_smoke_frame,
+                dataset=dataset,
+                dataset_root=dataset_root,
+                segment_everything=segment_everything,
+                detach=detach,
+                job_name=f"vanilla SAM smoke ({dataset})",
+                app_name=APP_NAME,
+            )
+        else:
+            if not image_path:
+                print(
+                    "Provide --image-path for a local image, or --smoke-test to use one "
+                    f"frame from the {dataset} volume.",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
+
+            image_file = Path(image_path)
+            if not image_file.is_file():
+                print(f"Image not found: {image_file}", file=sys.stderr)
+                raise SystemExit(1)
+
+            payload = {
+                "images_b64": [base64.b64encode(image_file.read_bytes()).decode("ascii")],
+                "segment_everything": segment_everything,
+                "multimask_output": True,
+            }
+            result = dispatch_remote(
+                VanillaSAMInference().predict,
+                payload,
+                detach=detach,
+                job_name="vanilla SAM predict",
+                app_name=APP_NAME,
+            )
+
         if detach:
             return
         print(f"OK — masks shape {result['masks']['shape']}")
         print(f"IoU heads: {result['iou_predictions']}")
+        if smoke_test and "smoke_frame" in result:
+            print(f"Frame: {result['smoke_frame']}")
 
 except ImportError:
     app = None  # type: ignore[assignment]

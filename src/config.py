@@ -34,6 +34,7 @@ class TrainerCfg:
     gradient_clip_val: int | float | None
     num_nodes: int = 1
     accumulate_grad_batches: int = 1
+    limit_test_batches: int | float | None = None
 
 
 @dataclass

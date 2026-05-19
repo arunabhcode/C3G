@@ -9,7 +9,7 @@ Deploy the HTTP endpoint::
 
     modal deploy src/inference/modal_c3g_sam.py
 
-Run a remote smoke test::
+Run a remote smoke test (random feature tensor)::
 
     modal run src/inference/modal_c3g_sam.py --smoke-test
 
@@ -35,10 +35,13 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
 
+from src.inference.modal_sam_common import (
+    DEFAULT_SAM_CHECKPOINT,
+    WEIGHTS_MOUNT,
+    WEIGHTS_VOLUME,
+)
+
 APP_NAME = "c3g-sam-pipeline"
-WEIGHTS_VOLUME = "c3g-weights"
-WEIGHTS_MOUNT = Path("/weights")
-DEFAULT_CHECKPOINT = WEIGHTS_MOUNT / "sam_vit_h.pth"
 DEFAULT_VARIANT = "sam_vit_h"
 
 
@@ -145,6 +148,16 @@ def _run_c3g_sam_decode(mask_decoder, device, payload: dict[str, Any]) -> dict[s
     }
 
 
+def _smoke_test_payload() -> dict[str, Any]:
+    rng = np.random.default_rng(0)
+    features = rng.standard_normal((1, 256, 64, 64), dtype=np.float32)
+    return {
+        "features_b64": base64.b64encode(features.tobytes()).decode("ascii"),
+        "shape": [1, 256, 64, 64],
+        "dtype": "float32",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Modal entrypoint
 # ---------------------------------------------------------------------------
@@ -172,7 +185,7 @@ try:
 
             from src.model.sam_decoder import SAMMaskDecoderWrapper
 
-            checkpoint_path = str(DEFAULT_CHECKPOINT)
+            checkpoint_path = str(DEFAULT_SAM_CHECKPOINT)
             if not Path(checkpoint_path).is_file():
                 raise FileNotFoundError(
                     f"SAM checkpoint not found at {checkpoint_path}. "
@@ -227,16 +240,9 @@ try:
             print("Pass --smoke-test to run a remote decode on random Bx256x64x64 features.")
             return
 
-        rng = np.random.default_rng(0)
-        features = rng.standard_normal((1, 256, 64, 64), dtype=np.float32)
-        payload = {
-            "features_b64": base64.b64encode(features.tobytes()).decode("ascii"),
-            "shape": [1, 256, 64, 64],
-            "dtype": "float32",
-        }
         result = dispatch_remote(
             C3GSAMPipeline().decode,
-            payload,
+            _smoke_test_payload(),
             detach=detach,
             job_name="C3G SAM decode",
             app_name=APP_NAME,

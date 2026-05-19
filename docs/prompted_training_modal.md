@@ -161,7 +161,41 @@ wandb.mode=disabled
 checkpointing.load=/outputs/runs/sam_prompted_replica/checkpoints/last.ckpt
 ```
 
-Wire these commands into a Modal function like `train_c3g_sam_feature` in `src/inference/modal_train_c3g_sam.py`, commit the output volume after training, and use `dispatch_remote(..., detach=True)` for long runs.
+### Modal CLI (`src/inference/modal_train_c3g_sam.py`)
+
+Full training:
+
+```bash
+modal run src/inference/modal_train_c3g_sam.py \
+    --run-name sam_prompted_replica --dataset replica
+
+modal run src/inference/modal_train_c3g_sam.py \
+    --run-name sam_prompted_scannet --dataset scannet
+```
+
+Smoke test (one training step on the first indexed scene; no checkpoint required):
+
+```bash
+modal run src/inference/modal_train_c3g_sam.py --smoke-test --dataset replica
+modal run src/inference/modal_train_c3g_sam.py --smoke-test --dataset scannet
+```
+
+Eval smoke test (one test batch; requires `--resume` with a trained checkpoint):
+
+```bash
+modal run src/inference/modal_train_c3g_sam.py \
+    --test --dataset replica \
+    --run-name sam_prompted_replica_eval \
+    --resume /outputs/runs/sam_prompted_replica/checkpoints/last.ckpt
+```
+
+Vanilla SAM on one dataset frame (`src/inference/modal_vanilla_sam.py`):
+
+```bash
+modal run src/inference/modal_vanilla_sam.py --smoke-test --dataset replica
+```
+
+Use `modal run --detach …` for long jobs. Shared volume paths and Hydra overrides live in `src/inference/modal_sam_common.py`.
 
 ### Key training parameters
 

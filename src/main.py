@@ -92,7 +92,7 @@ def train(cfg_dict: DictConfig):
     # This allows the current step to be shared with the data loader processes.
     step_tracker = StepTracker()
 
-    trainer = Trainer(
+    trainer_kwargs: dict = dict(
         max_epochs=-1,
         num_nodes=cfg.trainer.num_nodes,
         accelerator="gpu",
@@ -116,6 +116,9 @@ def train(cfg_dict: DictConfig):
         inference_mode=False if (cfg.mode == "test" and cfg.test.align_pose) else True,
         accumulate_grad_batches=cfg.trainer.accumulate_grad_batches,
     )
+    if cfg.trainer.limit_test_batches is not None:
+        trainer_kwargs["limit_test_batches"] = cfg.trainer.limit_test_batches
+    trainer = Trainer(**trainer_kwargs)
     torch.manual_seed(cfg_dict.seed + trainer.global_rank)
 
     vggt, dino, lseg_feature_extractor, clip, sam_encoder, feature_dim = (
