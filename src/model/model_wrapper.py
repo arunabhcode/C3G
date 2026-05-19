@@ -272,7 +272,25 @@ class ModelWrapper(LightningModule):
                 f"Please download the SAM weights to this path."
             )
 
-    def _decode_sam_mask_logits(
+    def clamp_rendered_features(self, output):
+        """Clamp rendered feature maps to [-1e4, 1e4], replacing NaN/Inf values."""
+        if output.feature is None:
+            return output
+        feat = output.feature
+        bad_mask = ~torch.isfinite(feat)
+        if bad_mask.any():
+            B, V = feat.shape[:2]
+            for v_idx in range(V):
+                if bad_mask[:, v_idx].any():
+                    print(
+                        f"[WARNING] step {self.global_step}, view {v_idx}: "
+                        f"NaN/Inf detected in rendered features, clamping applied"
+                    )
+            feat = torch.where(bad_mask, torch.zeros_like(feat), feat)
+        output.feature = feat.clamp(-1e4, 1e4)
+        return output
+
+    def decode_sam_mask_logits(
         self,
         rendered_features: Float[Tensor, "batch view feature_dim height width"],
     ) -> Tensor:
@@ -295,7 +313,7 @@ class ModelWrapper(LightningModule):
         if gt_masks.dim() == 3:
             gt_masks = gt_masks.unsqueeze(1)
 
-        pred_logits = self._decode_sam_mask_logits(rendered_features)
+        pred_logits = self.decode_sam_mask_logits(rendered_features)
         target_masks = rearrange(gt_masks, "b v h w -> (b v) 1 h w")
         per_sample = scores_from_logits(pred_logits, target_masks)
         agg = mean_scores(per_sample)
@@ -378,8 +396,8 @@ class ModelWrapper(LightningModule):
         feat_a = output_a.feature[:, 0:1]
         feat_b = output_b.feature[:, 0:1]
 
-        logits_a = self._decode_sam_mask_logits(feat_a)
-        logits_b = self._decode_sam_mask_logits(feat_b)
+        logits_a = self.decode_sam_mask_logits(feat_a)
+        logits_b = self.decode_sam_mask_logits(feat_b)
 
         mask_a = (logits_a[:, 0].sigmoid() > 0.5).to(torch.uint8) * 255
         mask_b = (logits_b[:, 0].sigmoid() > 0.5).to(torch.uint8) * 255
@@ -489,6 +507,7 @@ class ModelWrapper(LightningModule):
             depth_mode=self.train_cfg.depth_mode,
             global_step=self.global_step,
         )
+        output = self._clamp_rendered_features(output)
 
         target_gt = torch.cat(
             [batch["target"]["image"], ((batch["context"]["image"] + 1) / 2)], dim=1
@@ -728,7 +747,7 @@ class ModelWrapper(LightningModule):
         if gt_masks is None or output.feature is None or self.segmentation_loss is None:
             return
 
-        pred_logits = self._decode_sam_mask_logits(output.feature)
+        pred_logits = self.decode_sam_mask_logits(output.feature)
         target_masks = gt_masks.unsqueeze(1) if gt_masks.dim() == 3 else gt_masks
         per_sample = scores_from_logits(pred_logits, target_masks)
         scores = per_sample[0]

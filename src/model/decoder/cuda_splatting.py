@@ -169,14 +169,28 @@ def render_cuda(
 
             row, col = torch.triu_indices(3, 3)
 
+            means3D_feat = (
+                gaussian_means[i].detach() if feature_detach else gaussian_means[i]
+            )
+            cov3D_feat = (
+                gaussian_covariances[i, :, row, col].detach()
+                if feature_detach
+                else gaussian_covariances[i, :, row, col]
+            )
+            opacities_feat = (
+                gaussian_opacities[i, ..., None].detach()
+                if feature_detach
+                else gaussian_opacities[i, ..., None]
+            )
+
             image, features, radii, depth, opacity, n_touched = rasterizer(
-                means3D=gaussian_means[i],
+                means3D=means3D_feat,
                 means2D=mean_gradients,
                 shs=shs[i] if use_sh else None,
                 semantic_feature=gaussian_features[i],
                 colors_precomp=None if use_sh else shs[i, :, 0, :],
-                opacities=gaussian_opacities[i, ..., None],
-                cov3D_precomp=gaussian_covariances[i, :, row, col],
+                opacities=opacities_feat,
+                cov3D_precomp=cov3D_feat,
                 theta=cam_rot_delta[i] if cam_rot_delta is not None else None,
                 rho=cam_trans_delta[i] if cam_trans_delta is not None else None,
             )
