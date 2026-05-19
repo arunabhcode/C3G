@@ -57,10 +57,10 @@ from .decoder.decoder import Decoder, DepthRenderingMode
 from .encoder import Encoder
 from .encoder.visualization.encoder_visualizer import EncoderVisualizer
 from .utils import save_segmap, run_pca
-from ..loss.loss_segmentation import (
-    LossSegmentation,
-    LossSegmentationCfg,
-    LossSegmentationCfgWrapper,
+from ..loss.loss_segmentation_prompted import (
+    LossSegmentationPrompted,
+    LossSegmentationPromptedCfg,
+    LossSegmentationPromptedCfgWrapper,
 )
 
 
@@ -209,22 +209,21 @@ class ModelWrapper(LightningModule):
         else:
             self.clip_model = None
 
-        if self.train_cfg.sam_checkpoint and (
-            self.train_cfg.segmentation_loss_weight > 0
-            or "sam" in self.train_cfg.reproj_model
-        ):
-            seg_cfg = LossSegmentationCfgWrapper(
-                segmentation=LossSegmentationCfg(
-                    weight=self.train_cfg.segmentation_loss_weight,
+        if self.train_cfg.prompt_mode == "prompted" and self.train_cfg.sam_checkpoint:
+            prompted_cfg = LossSegmentationPromptedCfgWrapper(
+                segmentation_prompted=LossSegmentationPromptedCfg(
+                    weight=self.train_cfg.prompted_seg_loss_weight,
                     sam_checkpoint=self.train_cfg.sam_checkpoint,
                     sam_model_variant=self.train_cfg.sam_model_variant,
                     use_lora=self.train_cfg.use_lora,
                     lora_rank=self.train_cfg.lora_rank,
+                    prompt_strategy=self.train_cfg.prompt_strategy,
+                    min_object_pixels=self.train_cfg.min_object_pixels,
                 )
             )
-            self.segmentation_loss = LossSegmentation(seg_cfg)
+            self.prompted_segmentation_loss = LossSegmentationPrompted(prompted_cfg)
         else:
-            self.segmentation_loss = None
+            self.prompted_segmentation_loss = None
 
         # This is used for testing.
         self.benchmarker = Benchmarker()
@@ -256,6 +255,7 @@ class ModelWrapper(LightningModule):
         if not (
             "sam" in self.train_cfg.reproj_model
             or self.train_cfg.segmentation_loss_weight > 0
+            or self.train_cfg.prompt_mode == "prompted"
         ):
             return
 
@@ -613,26 +613,28 @@ class ModelWrapper(LightningModule):
             )
 
         if (
-            self.train_cfg.segmentation_loss_weight > 0
-            and self.segmentation_loss is not None
+            self.train_cfg.prompt_mode == "prompted"
+            and self.prompted_segmentation_loss is not None
+            and output.feature is not None
         ):
-            gt_masks = batch["target"].get("masks")
-            if gt_masks is not None and output.feature is not None:
-                segmentation_loss = self.segmentation_loss.forward(
+            target_labels = batch["target"].get("label")
+            if target_labels is not None:
+                prompted_loss = self.prompted_segmentation_loss.forward(
                     output,
                     batch,
                     gaussians,
                     self.global_step,
                 )
-                self.log(
-                    "loss/segmentation",
-                    segmentation_loss,
-                    on_step=True,
-                    on_epoch=True,
-                    prog_bar=True,
-                    logger=True,
-                )
-                total_loss = total_loss + segmentation_loss
+                if prompted_loss.item() > 0:
+                    self.log(
+                        "loss/prompted_segmentation",
+                        prompted_loss,
+                        on_step=True,
+                        on_epoch=True,
+                        prog_bar=True,
+                        logger=True,
+                    )
+                    total_loss = total_loss + prompted_loss
 
         self.log(
             "loss/total",
