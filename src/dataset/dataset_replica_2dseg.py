@@ -1,6 +1,6 @@
 """Replica 2D semantic segmentation loader (flat per-scene layout).
 
-Expects data prepared by :mod:`replica_data.download_replica`::
+Expects data prepared by :mod:`download_replica`::
 
     <root>/<scene_id>/{frame_id}_x.jpg
     <root>/<scene_id>/{frame_id}_cam.npz

@@ -14,7 +14,7 @@ Prerequisites on Modal volumes::
 
     # Prepared Replica 2D-seg scenes (see download_replica.py)
     modal volume put replica office0_x.jpg /replica/office0/...  # or populate via:
-    modal run src/dataset/replica_data/download_replica.py
+    modal run src/dataset/download_replica.py
 
 Run training (blocking)::
 
