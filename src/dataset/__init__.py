@@ -3,11 +3,7 @@ from dataclasses import fields
 from torch.utils.data import Dataset
 
 from .dataset_scannet_pose import DatasetScannetPose, DatasetScannetPoseCfgWrapper
-from .dataset_replica_pose import (
-    DatasetReplicaPose,
-    DatasetReplicaPoseCfg,
-    DatasetReplicaPoseCfgWrapper,
-)
+
 from .dataset_replica_2dseg import (
     DatasetReplica2dSeg,
     Replica2dSegCfg,
@@ -44,7 +40,6 @@ DATASETS: dict[str, Dataset] = {
     "scannet": DatasetScannet,
     "scannet_2dseg": DatasetScannet2dSeg,
     "replica": DatasetReplica,
-    "replica_pose": DatasetReplicaPose,
     "replica_2dseg": DatasetReplica2dSeg,
     "lerf_mask": DatasetLerfMask,
 }
@@ -58,7 +53,6 @@ DatasetCfgWrapper = (
     | DatasetScannetCfgWrapper
     | DatasetScannet2dSegCfgWrapper
     | DatasetReplicaCfgWrapper
-    | DatasetReplicaPoseCfgWrapper
     | DatasetReplica2dSegCfgWrapper
     | DatasetLerfMaskCfgWrapper
 )
@@ -67,7 +61,6 @@ DatasetCfg = (
     | ScannetCfg
     | Scannet2dSegCfg
     | ReplicaCfg
-    | DatasetReplicaPoseCfg
     | Replica2dSegCfg
     | LerfMaskCfg
 )
