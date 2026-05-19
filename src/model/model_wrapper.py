@@ -313,10 +313,10 @@ class ModelWrapper(LightningModule):
         rendered_features: Float[Tensor, "batch view feature_dim height width"],
     ) -> Tensor:
         """SAM mask-decoder logits for rendered features (B*V, K, H, W)."""
-        if self.segmentation_loss is None:
+        if self.prompted_segmentation_loss is None:
             raise RuntimeError("SAM segmentation loss must be initialized.")
         features_flat = rearrange(rendered_features, "b v c h w -> (b v) c h w")
-        return self.segmentation_loss.mask_decoder(features_flat)
+        return self.prompted_segmentation_loss.mask_decoder(features_flat)
 
     def compute_sam_mask_metrics(
         self,
@@ -764,7 +764,11 @@ class ModelWrapper(LightningModule):
     ) -> None:
         """Compute LERF-Mask IoU / boundary mIoU (pred vs GT) from rendered SAM features."""
         gt_masks = batch["target"].get("masks")
-        if gt_masks is None or output.feature is None or self.segmentation_loss is None:
+        if (
+            gt_masks is None
+            or output.feature is None
+            or self.prompted_segmentation_loss is None
+        ):
             return
 
         pred_logits = self.decode_sam_mask_logits(output.feature)
@@ -1436,9 +1440,9 @@ class ModelWrapper(LightningModule):
         self.log(f"val/lpips", lpips)
         self.log(f"val/ssim", ssim)
 
-        gt_masks = batch["target"]["masks"]
+        gt_masks = batch["target"].get("masks")
         if (
-            self.segmentation_loss is not None
+            self.prompted_segmentation_loss is not None
             and output.feature is not None
             and gt_masks is not None
         ):
@@ -1460,7 +1464,7 @@ class ModelWrapper(LightningModule):
                 logger=True,
             )
 
-        if self.segmentation_loss is not None and output.feature is not None:
+        if self.prompted_segmentation_loss is not None and output.feature is not None:
             mv_metrics = self.compute_multiview_consistency(gaussians, batch, (h, w))
             if mv_metrics:
                 self.log(
