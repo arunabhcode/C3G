@@ -101,17 +101,82 @@ def warp_mask_to_pose(
     src_intrinsics: np.ndarray | Tensor,
     dst_intrinsics: np.ndarray | Tensor,
     image_size: tuple[int, int],
+    depth: np.ndarray | Tensor | None = None,
 ) -> np.ndarray:
-    """
-    Warp a binary mask from the source camera into the destination camera frame.
+    """Warp a binary mask from the source camera into the destination camera frame via depth reprojection."""
+    import torch
 
-    TODO: Implement via depth-based reprojection, plane homography, or mesh rasterization.
-    """
-    raise NotImplementedError(
-        "warp_mask_to_pose is not implemented yet. "
-        "Project the mask from src_extrinsics/intrinsics into dst_extrinsics/intrinsics "
-        "using scene depth or a reference surface, then threshold the warped mask."
-    )
+    def _to_tensor(x):
+        if isinstance(x, np.ndarray):
+            return torch.from_numpy(x).float()
+        return x.float()
+
+    mask_t = _to_tensor(mask)
+    src_ext = _to_tensor(src_extrinsics)
+    dst_ext = _to_tensor(dst_extrinsics)
+    src_K = _to_tensor(src_intrinsics)
+    dst_K = _to_tensor(dst_intrinsics)
+
+    H, W = image_size
+    if mask_t.shape != (H, W):
+        mask_t = torch.nn.functional.interpolate(
+            mask_t.float().unsqueeze(0).unsqueeze(0), size=(H, W), mode="nearest"
+        ).squeeze()
+
+    if depth is None:
+        depth_t = torch.ones(H, W)
+    else:
+        depth_t = _to_tensor(depth)
+        if depth_t.shape != (H, W):
+            depth_t = torch.nn.functional.interpolate(
+                depth_t.unsqueeze(0).unsqueeze(0),
+                size=(H, W),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze()
+
+    v_coords, u_coords = torch.meshgrid(torch.arange(H), torch.arange(W), indexing="ij")
+    u_coords = u_coords.float()
+    v_coords = v_coords.float()
+
+    fx_s, fy_s = src_K[0, 0], src_K[1, 1]
+    cx_s, cy_s = src_K[0, 2], src_K[1, 2]
+
+    if fx_s < 2.0:
+        fx_s, cx_s = fx_s * W, cx_s * W
+        fy_s, cy_s = fy_s * H, cy_s * H
+
+    z = depth_t
+    x = (u_coords - cx_s) * z / fx_s
+    y = (v_coords - cy_s) * z / fy_s
+    pts_cam = torch.stack([x, y, z, torch.ones_like(z)], dim=-1)
+
+    src_c2w = src_ext
+    pts_world = (src_c2w @ pts_cam.reshape(-1, 4).T).T[:, :3]
+
+    dst_w2c = torch.linalg.inv(dst_ext)
+    pts_dst_cam = (dst_w2c[:3, :3] @ pts_world.T).T + dst_w2c[:3, 3]
+
+    dst_K_scaled = dst_K.clone()
+    fx_d, fy_d = dst_K_scaled[0, 0], dst_K_scaled[1, 1]
+    cx_d, cy_d = dst_K_scaled[0, 2], dst_K_scaled[1, 2]
+    if fx_d < 2.0:
+        fx_d, cx_d = fx_d * W, cx_d * W
+        fy_d, cy_d = fy_d * H, cy_d * H
+
+    z_dst = pts_dst_cam[:, 2]
+    valid = z_dst > 1e-6
+    u_dst = (fx_d * pts_dst_cam[:, 0] / z_dst + cx_d).long()
+    v_dst = (fy_d * pts_dst_cam[:, 1] / z_dst + cy_d).long()
+
+    in_bounds = valid & (u_dst >= 0) & (u_dst < W) & (v_dst >= 0) & (v_dst < H)
+    mask_flat = mask_t.reshape(-1).bool()
+    fg_and_valid = mask_flat & in_bounds
+
+    warped = torch.zeros(H, W, dtype=torch.uint8)
+    warped[v_dst[fg_and_valid], u_dst[fg_and_valid]] = 255
+
+    return warped.numpy()
 
 
 def warp_mask_iou(
@@ -122,6 +187,7 @@ def warp_mask_iou(
     src_intrinsics: np.ndarray | Tensor,
     dst_intrinsics: np.ndarray | Tensor,
     image_size: tuple[int, int],
+    depth: np.ndarray | Tensor | None = None,
 ) -> float:
     """
     IoU between a predicted mask warped into another camera and a reference prediction.
@@ -135,6 +201,7 @@ def warp_mask_iou(
         src_intrinsics,
         dst_intrinsics,
         image_size,
+        depth=depth,
     )
     return mask_iou(warped, reference_pred_mask)
 
@@ -156,12 +223,15 @@ def scores_from_logits(
 
     pred = pred_logits.sigmoid() > threshold
     if pred.shape[-2:] != gt_masks.shape[-2:]:
-        pred = torch.nn.functional.interpolate(
-            pred.float(),
-            size=gt_masks.shape[-2:],
-            mode="bilinear",
-            align_corners=False,
-        ) > threshold
+        pred = (
+            torch.nn.functional.interpolate(
+                pred.float(),
+                size=gt_masks.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+            > threshold
+        )
 
     n = pred.shape[0]
     results: list[MaskMetricScores] = []

@@ -48,7 +48,7 @@ data_loader:
 train:
   context_view_loss: true
   reproj_model: sam
-  feature_rendering_loss: 0
+  feature_rendering_loss: 0.01
   segmentation_loss_weight: 1.0
   sam_model_variant: sam_vit_h
   sam_checkpoint: "./pretrained_weights/sam_vit_h.pth"

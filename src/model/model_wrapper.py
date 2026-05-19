@@ -323,12 +323,9 @@ class ModelWrapper(LightningModule):
         src_intrinsics: Tensor,
         dst_intrinsics: Tensor,
         image_size: tuple[int, int],
+        depth: Tensor | None = None,
     ) -> Tensor:
-        """
-        Warp IoU between two predicted masks in different cameras (pred vs pred).
-
-        TODO: Requires ``warp_mask_to_pose`` (depth / homography reprojection).
-        """
+        """Warp IoU between two predicted masks in different cameras (pred vs pred)."""
         warp_iou = warp_mask_iou(
             pred_mask,
             reference_pred_mask,
@@ -337,8 +334,88 @@ class ModelWrapper(LightningModule):
             src_intrinsics,
             dst_intrinsics,
             image_size,
+            depth=depth,
         )
         return torch.tensor(warp_iou, device=pred_mask.device)
+
+    def compute_multiview_consistency(
+        self,
+        gaussians,
+        batch,
+        image_size: tuple[int, int],
+    ) -> dict[str, Tensor]:
+        """Render features from two context views, decode masks, and compute cross-view IoU."""
+        ctx_ext = batch["context"]["extrinsics"]
+        ctx_int = batch["context"]["intrinsics"]
+        ctx_near = batch["context"]["near"]
+        ctx_far = batch["context"]["far"]
+        num_views = ctx_ext.shape[1]
+        if num_views < 2:
+            return {}
+
+        output_a = self.decoder.forward(
+            gaussians,
+            ctx_ext[:, 0:1],
+            ctx_int[:, 0:1],
+            ctx_near[:, 0:1],
+            ctx_far[:, 0:1],
+            image_size,
+            "depth",
+        )
+        output_b = self.decoder.forward(
+            gaussians,
+            ctx_ext[:, 1:2],
+            ctx_int[:, 1:2],
+            ctx_near[:, 1:2],
+            ctx_far[:, 1:2],
+            image_size,
+            "depth",
+        )
+
+        if output_a.feature is None or output_b.feature is None:
+            return {}
+
+        feat_a = output_a.feature[:, 0:1]
+        feat_b = output_b.feature[:, 0:1]
+
+        logits_a = self._decode_sam_mask_logits(feat_a)
+        logits_b = self._decode_sam_mask_logits(feat_b)
+
+        mask_a = (logits_a[:, 0].sigmoid() > 0.5).to(torch.uint8) * 255
+        mask_b = (logits_b[:, 0].sigmoid() > 0.5).to(torch.uint8) * 255
+
+        depth_a = output_a.depth[:, 0] if output_a.depth is not None else None
+        h, w = image_size
+
+        iou_a_to_b = self.compute_warp_mask_miou(
+            mask_a[0],
+            mask_b[0],
+            ctx_ext[0, 0],
+            ctx_ext[0, 1],
+            ctx_int[0, 0],
+            ctx_int[0, 1],
+            (h, w),
+            depth=depth_a[0] if depth_a is not None else None,
+        )
+
+        depth_b = output_b.depth[:, 0] if output_b.depth is not None else None
+        iou_b_to_a = self.compute_warp_mask_miou(
+            mask_b[0],
+            mask_a[0],
+            ctx_ext[0, 1],
+            ctx_ext[0, 0],
+            ctx_int[0, 1],
+            ctx_int[0, 0],
+            (h, w),
+            depth=depth_b[0] if depth_b is not None else None,
+        )
+
+        mean_iou = (iou_a_to_b + iou_b_to_a) / 2.0
+        return {
+            "multiview_iou": mean_iou,
+            "multiview_iou_a_to_b": iou_a_to_b,
+            "multiview_iou_b_to_a": iou_b_to_a,
+        }
 
     def training_step(self, batch, batch_idx):
         # combine batch from different dataloaders
@@ -659,7 +736,9 @@ class ModelWrapper(LightningModule):
         pred_masks = pred_logits.sigmoid() > 0.5
         pred_masks_np = pred_masks.detach().cpu().numpy()
 
-        scene = batch["scene"][0] if isinstance(batch["scene"], list) else batch["scene"]
+        scene = (
+            batch["scene"][0] if isinstance(batch["scene"], list) else batch["scene"]
+        )
         prompt = batch.get("mask_prompt", ["unknown"])
         if isinstance(prompt, list):
             prompt = prompt[0]
@@ -1341,6 +1420,32 @@ class ModelWrapper(LightningModule):
                 prog_bar=True,
                 logger=True,
             )
+
+        if self.segmentation_loss is not None and output.feature is not None:
+            mv_metrics = self.compute_multiview_consistency(gaussians, batch, (h, w))
+            if mv_metrics:
+                self.log(
+                    "val/multiview_iou",
+                    mv_metrics["multiview_iou"],
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                )
+                self.log(
+                    "val/multiview_iou_a_to_b",
+                    mv_metrics["multiview_iou_a_to_b"],
+                    on_step=False,
+                    on_epoch=True,
+                    logger=True,
+                )
+                self.log(
+                    "val/multiview_iou_b_to_a",
+                    mv_metrics["multiview_iou_b_to_a"],
+                    on_step=False,
+                    on_epoch=True,
+                    logger=True,
+                )
 
         # Construct comparison image.
         context_img = inverse_normalize(batch["context"]["image"][0])
