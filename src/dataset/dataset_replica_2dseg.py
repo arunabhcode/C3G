@@ -1,140 +1,52 @@
 """Replica 2D semantic segmentation loader (flat per-scene layout).
 
-Expects data prepared by :mod:`download_replica`::
+Expects data prepared by :mod:`download_replica` on the Modal ``replica`` volume::
 
     <root>/<scene_id>/{frame_id}_x.jpg
     <root>/<scene_id>/{frame_id}_cam.npz
     <root>/<scene_id>/{frame_id}_y.png
 
-See :mod:`src.misc.frame_layout` for naming conventions.
+Sampling, preprocessing, and batch layout match :mod:`dataset_replica_semseg`;
+only on-disk paths and pose/intrinsic loading differ (per-frame ``_cam.npz``).
 """
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field
+import logging
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 import cv2
 import numpy as np
 import torch
 import torchvision.transforms as tf
 from einops import repeat
-from jaxtyping import Float
 from PIL import Image
-from torch import Tensor
 from torch.utils.data import IterableDataset
 
 from ..misc.cam_utils import camera_normalization
-from .cropping import (
-    bbox_from_intrinsics_in_out,
-    camera_matrix_of_crop,
-    crop_image_depthmap,
-    rescale_image_depthmap,
-)
+from ..misc.frame_layout import FramePaths, list_frame_ids
 from .dataset import DatasetCfgCommon
-from ..misc.frame_layout import FramePaths
-from .types import Stage
-from .view_sampler import ViewSampler
 
-REPLICA_LABELS: dict[str, list[str]] = {
-    "office3": ["wall", "ceiling", "floor", "chair", "table"],
-    "office4": ["wall", "ceiling", "floor", "chair", "tv-screen", "table"],
-    "room1": ["wall", "ceiling", "floor", "bed", "blinds"],
-}
+logger = logging.getLogger(__name__)
 
-REPLICA_LABEL_MAPPING: dict[str, dict[int, int]] = {
-    "office3": {
-        0: 0,
-        8: 3,
-        10: 0,
-        12: 1,
-        14: 0,
-        15: 0,
-        17: 0,
-        20: 4,
-        22: 0,
-        29: 4,
-        31: 2,
-        35: 5,
-        37: 1,
-        40: 3,
-        47: 2,
-        56: 0,
-        62: 0,
-        76: 4,
-        79: 0,
-        80: 5,
-        82: 0,
-        83: 0,
-        88: 0,
-        92: 0,
-        93: 1,
-        95: 0,
-        97: 1,
-    },
-    "office4": {
-        0: 0,
-        8: 3,
-        10: 0,
-        17: 0,
-        20: 4,
-        22: 0,
-        31: 2,
-        37: 0,
-        40: 3,
-        47: 2,
-        56: 5,
-        80: 6,
-        87: 5,
-        92: 0,
-        93: 1,
-        95: 0,
-        97: 1,
-    },
-    "room1": {
-        0: 0,
-        3: 0,
-        7: 4,
-        11: 4,
-        12: 5,
-        13: 0,
-        18: 0,
-        26: 0,
-        31: 2,
-        37: 1,
-        40: 3,
-        44: 0,
-        47: 0,
-        54: 0,
-        56: 0,
-        59: 1,
-        61: 4,
-        64: 0,
-        79: 0,
-        91: 0,
-        92: 0,
-        93: 1,
-        95: 0,
-        97: 1,
-    },
-}
-
-
-def imread_cv2(path: str | Path, options=cv2.IMREAD_COLOR) -> np.ndarray:
-    img = cv2.imread(str(path), options)
-    if img is None:
-        raise OSError(f"Could not load image={path} with {options=}")
-    if img.ndim == 3:
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    return img
+SCENES = [
+    "office0",
+    "office1",
+    "office2",
+    "office3",
+    "office4",
+    "room0",
+    "room1",
+    "room2",
+]
 
 
 @dataclass
 class Replica2dSegCfg(DatasetCfgCommon):
     name: str
     roots: list[Path]
+    scenes: list[str]
     baseline_min: float
     baseline_max: float
     max_fov: float
@@ -142,10 +54,9 @@ class Replica2dSegCfg(DatasetCfgCommon):
     augment: bool
     relative_pose: bool
     skip_bad_shape: bool
-    llff_hold: int = 8
-    test_ids: list[int] = field(default_factory=lambda: [1])
     num_of_inputs: int = 2
-    context_eval: bool = False
+    prompt_strategy: str = "centroid"
+    min_object_pixels: int = 16
 
 
 @dataclass
@@ -154,152 +65,151 @@ class DatasetReplica2dSegCfgWrapper:
 
 
 class DatasetReplica2dSeg(IterableDataset):
-    cfg: Replica2dSegCfg
-    stage: Stage
-    view_sampler: ViewSampler
+    """Loads Replica flat 2D-seg volume with the same logic as ``DatasetReplicaSemSeg``."""
 
-    to_tensor: tf.ToTensor
     near: float = 0.01
     far: float = 100.0
 
-    def __init__(
-        self,
-        cfg: Replica2dSegCfg,
-        stage: Stage,
-        view_sampler: ViewSampler,
-    ) -> None:
+    def __init__(self, cfg, stage, view_sampler):
         super().__init__()
         self.cfg = cfg
         self.stage = stage
         self.view_sampler = view_sampler
         self.to_tensor = tf.ToTensor()
 
-        with (Path(cfg.roots[0]) / "selected_seqs_test.json").open("r") as file_handle:
-            self.scenes = {
-                scene: sorted(frame_ids)
-                for scene, frame_ids in json.load(file_handle).items()
-                if frame_ids
-            }
-        self.scene_list = list(self.scenes.keys())
+        root = Path(cfg.roots[0])
+        if not root.exists():
+            raise FileNotFoundError(f"Dataset root does not exist: {root}")
 
-    def map_labels(self, scene_id: str, label_map: np.ndarray) -> np.ndarray:
-        mapping = REPLICA_LABEL_MAPPING[scene_id]
-        remapped = label_map.copy()
-        for raw_id, mapped_id in mapping.items():
-            remapped[label_map == raw_id] = mapped_id
-        for unique_label in np.unique(label_map):
-            if unique_label not in mapping:
-                remapped[label_map == unique_label] = 0
-        return remapped
+        self.root = root
+        self.intrinsics = self.load_intrinsics()
+        self.frame_ids = {
+            scene: list_frame_ids(self.root / scene) for scene in cfg.scenes
+        }
 
-    def _crop_resize_if_necessary(self, image, depthmap, intrinsics, resolution, info=None):
-        if not isinstance(image, Image.Image):
-            image = Image.fromarray(image)
+    def load_intrinsics(self):
+        """Read shared intrinsics from the first available frame camera file."""
+        for scene in self.cfg.scenes:
+            frame_ids = list_frame_ids(self.root / scene)
+            if not frame_ids:
+                continue
+            camera_path = FramePaths.from_frame_id(
+                self.root / scene, frame_ids[0]
+            ).camera
+            metadata = np.load(camera_path)
+            return metadata["camera_intrinsics"].astype(np.float32)
 
-        width, height = image.size
-        cx, cy = intrinsics[:2, 2].round().astype(int)
-        min_margin_x = min(cx, width - cx)
-        min_margin_y = min(cy, height - cy)
-        left, top = cx - min_margin_x, cy - min_margin_y
-        right, bottom = cx + min_margin_x, cy + min_margin_y
-        crop_bbox = (left, top, right, bottom)
-        image, depthmap, intrinsics = crop_image_depthmap(
-            image, depthmap, intrinsics, crop_bbox
+        raise FileNotFoundError(
+            f"No camera files found under {self.root} for scenes {self.cfg.scenes}"
         )
 
-        width, height = image.size
-        assert resolution[0] >= resolution[1]
-        if height > 1.1 * width:
-            resolution = resolution[::-1]
+    def decompose_labels(self, label_map):
+        """Label map -> (K, H, W) binary masks for non-background objects."""
+        unique_ids = np.unique(label_map)
+        non_bg_ids = unique_ids[unique_ids != 0]
 
-        target_resolution = np.array(resolution)
-        image, depthmap, intrinsics = rescale_image_depthmap(
-            image, depthmap, intrinsics, target_resolution
-        )
+        if len(non_bg_ids) == 0:
+            h, w = label_map.shape
+            return torch.zeros((0, h, w), dtype=torch.float32)
 
-        intrinsics2 = camera_matrix_of_crop(
-            intrinsics, image.size, resolution, offset_factor=0.5
-        )
-        crop_bbox = bbox_from_intrinsics_in_out(intrinsics, intrinsics2, resolution)
-        image, depthmap, intrinsics2 = crop_image_depthmap(
-            image, depthmap, intrinsics, crop_bbox
-        )
-        return image, depthmap, intrinsics2
+        masks = []
+        for obj_id in non_bg_ids:
+            mask = (label_map == obj_id).astype(np.float32)
+            masks.append(mask)
+
+        return torch.from_numpy(np.stack(masks, axis=0))
+
+    def get_num_frames(self, scene):
+        """Get number of frames available for a scene."""
+        return len(self.frame_ids[scene])
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
-        scene_list = self.scene_list
+        scene_list = list(self.cfg.scenes)
+
         if self.stage == "test" and worker_info is not None:
             scene_list = [
                 scene
-                for scene_index, scene in enumerate(scene_list)
-                if scene_index % worker_info.num_workers == worker_info.id
+                for idx, scene in enumerate(scene_list)
+                if idx % worker_info.num_workers == worker_info.id
             ]
 
-        for scene_id in scene_list:
-            frame_ids = self.scenes[scene_id]
-            selected_views = [
-                view_index
-                for view_index in range(len(frame_ids))
-                if view_index % self.cfg.llff_hold in self.cfg.test_ids
-            ]
+        for scene in scene_list:
+            frame_ids = self.frame_ids[scene]
+            num_frames = len(frame_ids)
+            if num_frames < self.cfg.num_of_inputs + 1:
+                continue
 
-            for target_view in selected_views:
-                left_idxs = [
-                    max(target_view - offset, 0)
-                    for offset in range(1, (self.cfg.num_of_inputs + 2) // 2)
-                ]
-                right_idxs = [
-                    min(target_view + offset, len(frame_ids) - 1)
-                    for offset in range(1, (self.cfg.num_of_inputs + 2) // 2)
-                ]
-                idxs: list[int] = []
-                for left, right in zip(left_idxs, right_idxs):
-                    idxs.extend([left, right])
-                idxs.append(target_view)
+            context_indices, target_indices = self.sample_views(scene, num_frames)
 
-                scene_dir = Path(self.cfg.roots[0]) / scene_id
-                extrinsics_list: list[np.ndarray] = []
-                intrinsics_list: list[np.ndarray] = []
-                images_list: list[Tensor] = []
-                label_list: list[Tensor] = []
+            for target_idx in target_indices:
+                idxs = list(context_indices) + [target_idx]
+
+                extrinsics_list = []
+                intrinsics_list = []
+                images_list = []
+                label_list = []
+                valid = True
 
                 for view_index in idxs:
-                    paths = FramePaths.from_frame_id(scene_dir, frame_ids[view_index])
+                    frame_id = frame_ids[view_index]
+                    paths = FramePaths.from_frame_id(self.root / scene, frame_id)
+
+                    if not paths.image.is_file() or not paths.label.is_file():
+                        logger.warning(
+                            f"Missing files for {scene} frame {frame_id}"
+                        )
+                        valid = False
+                        break
+
+                    rgb = cv2.imread(str(paths.image), cv2.IMREAD_COLOR)
+                    if rgb is None:
+                        logger.warning(f"Could not read {paths.image}, skipping")
+                        valid = False
+                        break
+                    rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+
+                    label_map = cv2.imread(str(paths.label), cv2.IMREAD_UNCHANGED)
+                    if label_map is None:
+                        logger.warning(f"Could not read {paths.label}, skipping")
+                        valid = False
+                        break
+
+                    h_target, w_target = self.cfg.input_image_shape
+                    rgb_resized = cv2.resize(
+                        rgb, (w_target, h_target), interpolation=cv2.INTER_LINEAR
+                    )
+                    label_resized = cv2.resize(
+                        label_map, (w_target, h_target), interpolation=cv2.INTER_NEAREST
+                    )
+
+                    intrinsics = self.intrinsics.copy()
+                    orig_h, orig_w = self.cfg.original_image_shape
+                    intrinsics[0, :] *= w_target / orig_w
+                    intrinsics[1, :] *= h_target / orig_h
+
+                    intrinsics[0, :] /= w_target
+                    intrinsics[1, :] /= h_target
+
+                    if not paths.camera.is_file():
+                        logger.warning(f"Missing camera file {paths.camera}, skipping")
+                        valid = False
+                        break
+
                     metadata = np.load(paths.camera)
-                    camera_pose = metadata["camera_pose"].astype(np.float32)
-                    if np.any(np.isinf(camera_pose)):
-                        continue
+                    pose = metadata["camera_pose"].astype(np.float32)
+                    if np.any(np.isinf(pose)) or np.any(np.isnan(pose)):
+                        valid = False
+                        break
 
-                    intrinsics = metadata["camera_intrinsics"].astype(np.float32)
-                    rgb_image = imread_cv2(paths.image)
-                    labelmap = imread_cv2(paths.label, options=cv2.IMREAD_UNCHANGED)
-                    labelmap = self.map_labels(scene_id, labelmap)
-
-                    depthmap = np.ones(labelmap.shape[:2], dtype=np.uint16)
-                    maskmap = np.ones_like(depthmap) * 255
-                    depth_mask_label = np.stack([depthmap, maskmap, labelmap], axis=-1)
-
-                    rgb_image, depth_mask_label, intrinsics = self._crop_resize_if_necessary(
-                        rgb_image,
-                        depth_mask_label,
-                        intrinsics,
-                        self.cfg.input_image_shape,
-                        info=str(paths.image),
-                    )
-
-                    intrinsics[0, :] /= self.cfg.input_image_shape[0]
-                    intrinsics[1, :] /= self.cfg.input_image_shape[1]
-                    labelmap = depth_mask_label[:, :, 2]
-
-                    extrinsics_list.append(camera_pose)
+                    extrinsics_list.append(pose)
                     intrinsics_list.append(intrinsics)
-                    images_list.append(self.to_tensor(rgb_image))
+                    images_list.append(self.to_tensor(Image.fromarray(rgb_resized)))
                     label_list.append(
-                        torch.from_numpy(labelmap.astype(np.int64)).unsqueeze(0)
+                        torch.from_numpy(label_resized.astype(np.int64)).unsqueeze(0)
                     )
 
-                if len(extrinsics_list) < len(idxs):
+                if not valid or len(extrinsics_list) < len(idxs):
                     continue
 
                 extrinsics = torch.from_numpy(
@@ -311,7 +221,9 @@ class DatasetReplica2dSeg(IterableDataset):
                 images = torch.stack(images_list, dim=0)
                 labels = torch.cat(label_list, dim=0)
 
-                context_extrinsics = extrinsics[: self.cfg.num_of_inputs]
+                num_ctx = self.cfg.num_of_inputs
+                context_extrinsics = extrinsics[:num_ctx]
+
                 if self.cfg.make_baseline_1:
                     a, b = context_extrinsics[0, :3, 3], context_extrinsics[-1, :3, 3]
                     scale = (a - b).norm()
@@ -324,86 +236,63 @@ class DatasetReplica2dSeg(IterableDataset):
                 if self.cfg.relative_pose:
                     extrinsics = camera_normalization(extrinsics[0:1], extrinsics)
 
-                class_names = REPLICA_LABELS[scene_id]
-                if self.cfg.context_eval:
-                    for view_offset in range(self.cfg.num_of_inputs):
-                        yield {
-                            "context": {
-                                "extrinsics": extrinsics[: self.cfg.num_of_inputs],
-                                "intrinsics": intrinsics[: self.cfg.num_of_inputs],
-                                "image": images[: self.cfg.num_of_inputs],
-                                "label": labels[: self.cfg.num_of_inputs],
-                                "near": self.get_bound("near", self.cfg.num_of_inputs)
-                                / scale,
-                                "far": self.get_bound("far", self.cfg.num_of_inputs)
-                                / scale,
-                                "index": torch.tensor(
-                                    idxs[: self.cfg.num_of_inputs], dtype=torch.int64
-                                ),
-                                "overlap": 0,
-                                "text": class_names,
-                            },
-                            "target": {
-                                "extrinsics": extrinsics[view_offset : view_offset + 1],
-                                "intrinsics": intrinsics[view_offset : view_offset + 1],
-                                "image": images[view_offset : view_offset + 1],
-                                "label": labels[view_offset : view_offset + 1],
-                                "near": self.get_bound("near", 1) / scale,
-                                "far": self.get_bound("far", 1) / scale,
-                                "index": torch.tensor(
-                                    idxs[self.cfg.num_of_inputs :], dtype=torch.int64
-                                ),
-                                "text": class_names,
-                            },
-                            "scene": scene_id,
-                        }
-                else:
-                    yield {
-                        "context": {
-                            "extrinsics": extrinsics[: self.cfg.num_of_inputs],
-                            "intrinsics": intrinsics[: self.cfg.num_of_inputs],
-                            "image": images[: self.cfg.num_of_inputs],
-                            "label": labels[: self.cfg.num_of_inputs],
-                            "near": self.get_bound("near", self.cfg.num_of_inputs)
-                            / scale,
-                            "far": self.get_bound("far", self.cfg.num_of_inputs) / scale,
-                            "index": torch.tensor(
-                                idxs[: self.cfg.num_of_inputs], dtype=torch.int64
-                            ),
-                            "overlap": 0,
-                            "text": class_names,
-                        },
-                        "target": {
-                            "extrinsics": extrinsics[self.cfg.num_of_inputs :],
-                            "intrinsics": intrinsics[self.cfg.num_of_inputs :],
-                            "image": images[self.cfg.num_of_inputs :],
-                            "label": labels[self.cfg.num_of_inputs :],
-                            "near": self.get_bound(
-                                "near", len(idxs) - self.cfg.num_of_inputs
-                            )
-                            / scale,
-                            "far": self.get_bound(
-                                "far", len(idxs) - self.cfg.num_of_inputs
-                            )
-                            / scale,
-                            "index": torch.tensor(
-                                idxs[self.cfg.num_of_inputs :], dtype=torch.int64
-                            ),
-                            "text": class_names,
-                        },
-                        "scene": scene_id,
-                    }
+                context_frame_ids = [int(frame_ids[i]) for i in context_indices]
+                target_frame_id = int(frame_ids[target_idx])
 
-    def get_bound(
-        self,
-        bound: Literal["near", "far"],
-        num_views: int,
-    ) -> Float[Tensor, " view"]:
+                yield {
+                    "context": {
+                        "extrinsics": extrinsics[:num_ctx],
+                        "intrinsics": intrinsics[:num_ctx],
+                        "image": images[:num_ctx],
+                        "label": labels[:num_ctx],
+                        "near": self.get_bound("near", num_ctx) / scale,
+                        "far": self.get_bound("far", num_ctx) / scale,
+                        "index": torch.tensor(context_frame_ids, dtype=torch.int64),
+                        "overlap": 0,
+                    },
+                    "target": {
+                        "extrinsics": extrinsics[num_ctx:],
+                        "intrinsics": intrinsics[num_ctx:],
+                        "image": images[num_ctx:],
+                        "label": labels[num_ctx:],
+                        "near": self.get_bound("near", 1) / scale,
+                        "far": self.get_bound("far", 1) / scale,
+                        "index": torch.tensor([target_frame_id], dtype=torch.int64),
+                    },
+                    "scene": scene,
+                }
+
+    def sample_views(self, scene, num_frames):
+        """Sample context and target view indices for a scene."""
+        if self.stage == "test":
+            context_indices = [0, min(self.cfg.num_of_inputs, num_frames - 1)]
+            target_indices = list(range(num_frames))
+        else:
+            max_gap = min(num_frames - 1, 10)
+            left = torch.randint(0, num_frames - max_gap, size=()).item()
+            right = left + torch.randint(2, max_gap + 1, size=()).item()
+            right = min(right, num_frames - 1)
+            context_indices = [left, right]
+
+            num_targets = min(num_frames - 2, 1)
+            low = left + 1
+            high = right
+            if high <= low:
+                target_indices = [left]
+            else:
+                target_indices = [
+                    torch.randint(low, high, size=()).item() for _ in range(num_targets)
+                ]
+
+        return context_indices, target_indices
+
+    def get_bound(self, bound, num_views):
+        """Get near/far bound repeated for num_views."""
         value = torch.tensor(getattr(self, bound), dtype=torch.float32)
         return repeat(value, "-> v", v=num_views)
 
     @property
-    def data_stage(self) -> Stage:
+    def data_stage(self):
         if self.cfg.overfit_to_scene is not None:
             return "test"
         if self.stage == "val":
