@@ -351,7 +351,9 @@ def build_vanilla_sam_modal_image(
     """
     import modal
 
-    src = src_root or (repo_root_for_modal() / "src")
+    # Resolve from this file so local dev and vanilla Modal workers (/root/src) both work
+    # without a full repo checkout (workers mount only src/, not pyproject.toml).
+    src = src_root or Path(__file__).resolve().parent.parent
     return (
         modal.Image.debian_slim(python_version="3.11")
         .apt_install("git", "ca-certificates")

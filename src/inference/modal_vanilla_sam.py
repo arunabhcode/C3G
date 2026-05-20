@@ -232,7 +232,7 @@ try:
 
     @app.cls(
         image=inference_image,
-        gpu="A100-40G",
+        gpu="A100-40GB",
         volumes={
             str(WEIGHTS_MOUNT): weights_volume,
             str(REPLICA_MOUNT): replica_volume,
