@@ -20,12 +20,18 @@ Full training::
     modal run src/inference/modal_train_c3g_sam.py \\
         --run-name sam_prompted_replica --dataset replica
 
-Smoke test (one training step on the first scene/frame)::
+Smoke test (detached on Modal GPU; no local GPU or dataset required)::
 
-    modal run src/inference/modal_train_c3g_sam.py \\
-        --smoke-test --dataset replica
+    modal run src/inference/modal_train_c3g_sam.py::smoke --dataset replica
 
-Eval smoke test (one test batch; requires a checkpoint on the output volume)::
+    # equivalent:
+    modal run src/inference/modal_train_c3g_sam.py --smoke-test --dataset replica
+
+Block until the smoke job finishes (optional)::
+
+    modal run src/inference/modal_train_c3g_sam.py::smoke --dataset replica --wait
+
+Eval smoke test (one test batch on Modal; requires a checkpoint on the output volume)::
 
     modal run src/inference/modal_train_c3g_sam.py \\
         --test --dataset replica \\
@@ -61,6 +67,7 @@ from src.inference.modal_sam_common import (
     build_prompted_train_overrides,
     find_smoke_scene,
     resolve_dataset_root,
+    resolve_detach,
 )
 
 APP_NAME = "c3g-train-sam-feature"
@@ -151,6 +158,97 @@ def _validate_paths(
         )
 
 
+def _execute_c3g_sam_job(
+    *,
+    output_volume: object,
+    run_name: str,
+    dataset: DatasetName,
+    max_steps: int,
+    wandb_mode: str,
+    resume: str | None,
+    gaussian_weights: str | None,
+    sam_checkpoint: str | None,
+    dataset_root: str | None,
+    val_interval: int,
+    batch_size: int,
+    prompt_strategy: str,
+    prompted_seg_loss_weight: float,
+    min_object_pixels: int,
+    smoke_test: bool,
+    test: bool,
+) -> str:
+    """Run training, smoke train, or eval entirely on the Modal container."""
+    if smoke_test and test:
+        raise ValueError("Pass only one of smoke_test=True or test=True.")
+
+    spec = DATASET_SPECS[dataset]
+    gaussian_path = _resolve_weights(gaussian_weights)
+    sam_path = sam_checkpoint or str(DEFAULT_SAM_CHECKPOINT)
+    data_root = resolve_dataset_root(dataset, dataset_root)
+    _validate_paths(
+        spec=spec,
+        gaussian_path=gaussian_path,
+        sam_path=sam_path,
+        data_root=data_root,
+    )
+
+    smoke_scene: str | None = None
+    if smoke_test or test:
+        smoke_scene = find_smoke_scene(data_root)
+        print(f"Smoke scene (first in index): {smoke_scene}")
+
+    if test:
+        if not resume:
+            raise ValueError(
+                "test=True requires resume= with a checkpoint on the output volume."
+            )
+        if not Path(resume).is_file():
+            raise FileNotFoundError(f"Checkpoint not found: {resume}")
+        overrides = build_prompted_test_overrides(
+            run_name=run_name,
+            dataset=dataset,
+            dataset_root=data_root,
+            sam_checkpoint=sam_path,
+            checkpoint_path=resume,
+            wandb_mode=wandb_mode,
+            smoke_scene=smoke_scene,
+        )
+    else:
+        overrides = build_prompted_train_overrides(
+            run_name=run_name,
+            dataset=dataset,
+            dataset_root=data_root,
+            max_steps=1 if smoke_test else max_steps,
+            wandb_mode="disabled" if smoke_test else wandb_mode,
+            gaussian_weights=gaussian_path,
+            sam_checkpoint=sam_path,
+            val_interval=10_000 if smoke_test else val_interval,
+            batch_size=1 if smoke_test else batch_size,
+            prompt_strategy=prompt_strategy,
+            prompted_seg_loss_weight=prompted_seg_loss_weight,
+            min_object_pixels=min_object_pixels,
+            resume=None if smoke_test else resume,
+            smoke_scene=smoke_scene if smoke_test else None,
+        )
+        if smoke_test:
+            overrides.extend(
+                [
+                    "data_loader.train.num_workers=0",
+                    "checkpointing.every_n_train_steps=1000000",
+                ]
+            )
+
+    cmd = _build_main_command(overrides)
+    print("Running:", " ".join(shlex.quote(part) for part in cmd))
+    subprocess.run(cmd, check=True, cwd=str(WORKSPACE))
+
+    run_dir = OUTPUT_MOUNT / "runs" / run_name
+    output_volume.commit()  # type: ignore[union-attr]
+    label = "Smoke test" if smoke_test else "Test" if test else "Training"
+    print(f"{label} complete. Artifacts under {run_dir} (volume `{OUTPUT_VOLUME}`).")
+    return str(run_dir)
+
+
 # ---------------------------------------------------------------------------
 # Modal entrypoint
 # ---------------------------------------------------------------------------
@@ -165,16 +263,18 @@ try:
     scannet_volume = modal.Volume.from_name(SCANNET_VOLUME, create_if_missing=True)
     output_volume = modal.Volume.from_name(OUTPUT_VOLUME, create_if_missing=True)
 
+    _VOLUMES = {
+        str(WEIGHTS_MOUNT): weights_volume,
+        str(REPLICA_MOUNT): replica_volume,
+        str(SCANNET_MOUNT): scannet_volume,
+        str(OUTPUT_MOUNT): output_volume,
+    }
+
     @app.function(
         image=training_image,
         gpu="A100-40GB",
         timeout=60 * 60 * 24,
-        volumes={
-            str(WEIGHTS_MOUNT): weights_volume,
-            str(REPLICA_MOUNT): replica_volume,
-            str(SCANNET_MOUNT): scannet_volume,
-            str(OUTPUT_MOUNT): output_volume,
-        },
+        volumes=_VOLUMES,
     )
     def train_c3g_sam_feature(
         run_name: str,
@@ -193,74 +293,115 @@ try:
         smoke_test: bool = False,
         test: bool = False,
     ) -> str:
-        """Train, smoke-test (1 step), or eval (1 batch) C3G-F + SAM on 2dseg data."""
-        if smoke_test and test:
-            raise ValueError("Pass only one of smoke_test=True or test=True.")
-
-        spec = DATASET_SPECS[dataset]
-        gaussian_path = _resolve_weights(gaussian_weights)
-        sam_path = sam_checkpoint or str(DEFAULT_SAM_CHECKPOINT)
-        data_root = resolve_dataset_root(dataset, dataset_root)
-        _validate_paths(
-            spec=spec,
-            gaussian_path=gaussian_path,
-            sam_path=sam_path,
-            data_root=data_root,
+        """Full training on Modal (also used for eval when ``test=True``)."""
+        return _execute_c3g_sam_job(
+            output_volume=output_volume,
+            run_name=run_name,
+            dataset=dataset,
+            max_steps=max_steps,
+            wandb_mode=wandb_mode,
+            resume=resume,
+            gaussian_weights=gaussian_weights,
+            sam_checkpoint=sam_checkpoint,
+            dataset_root=dataset_root,
+            val_interval=val_interval,
+            batch_size=batch_size,
+            prompt_strategy=prompt_strategy,
+            prompted_seg_loss_weight=prompted_seg_loss_weight,
+            min_object_pixels=min_object_pixels,
+            smoke_test=smoke_test,
+            test=test,
         )
 
-        smoke_scene = find_smoke_scene(data_root)
-        print(f"Smoke scene (first in index): {smoke_scene}")
+    @app.function(
+        image=training_image,
+        gpu="A10G",
+        timeout=60 * 60 * 2,
+        volumes=_VOLUMES,
+    )
+    def smoke_test_c3g_sam_feature(
+        dataset: DatasetName = "replica",
+        run_name: str | None = None,
+        gaussian_weights: str | None = None,
+        sam_checkpoint: str | None = None,
+        dataset_root: str | None = None,
+    ) -> str:
+        """One training step on Modal GPU using the dataset volume (smoke test)."""
+        return _execute_c3g_sam_job(
+            output_volume=output_volume,
+            run_name=run_name or f"sam_smoke_{dataset}",
+            dataset=dataset,
+            max_steps=1,
+            wandb_mode="disabled",
+            resume=None,
+            gaussian_weights=gaussian_weights,
+            sam_checkpoint=sam_checkpoint,
+            dataset_root=dataset_root,
+            val_interval=10_000,
+            batch_size=1,
+            prompt_strategy="centroid",
+            prompted_seg_loss_weight=1.0,
+            min_object_pixels=16,
+            smoke_test=True,
+            test=False,
+        )
 
-        if test:
-            if not resume:
-                raise ValueError(
-                    "test=True requires resume= with a checkpoint on the output volume."
-                )
-            if not Path(resume).is_file():
-                raise FileNotFoundError(f"Checkpoint not found: {resume}")
-            overrides = build_prompted_test_overrides(
-                run_name=run_name,
-                dataset=dataset,
-                dataset_root=data_root,
-                sam_checkpoint=sam_path,
-                checkpoint_path=resume,
-                wandb_mode=wandb_mode,
-                smoke_scene=smoke_scene,
+    def _dispatch_c3g_sam(
+        *,
+        run_name: str,
+        dataset: DatasetName,
+        smoke_test: bool,
+        test: bool,
+        detach: bool | None,
+        wait: bool,
+        **kwargs: object,
+    ) -> None:
+        from src.misc.modal_run import dispatch_remote
+
+        if dataset not in DATASET_SPECS:
+            print(
+                f"Unknown dataset {dataset!r}; choose one of: {', '.join(DATASET_SPECS)}",
+                file=sys.stderr,
             )
+            raise SystemExit(2)
+
+        if test and not kwargs.get("resume"):
+            print("--test requires --resume with a checkpoint path.", file=sys.stderr)
+            raise SystemExit(2)
+
+        remote_job = smoke_test or test
+        use_detach = resolve_detach(detach=detach, remote_job=remote_job and not wait)
+
+        if smoke_test and not test:
+            remote_fn = smoke_test_c3g_sam_feature
+            call_kwargs = {
+                "dataset": dataset,
+                "run_name": run_name,
+                "gaussian_weights": kwargs.get("gaussian_weights"),
+                "sam_checkpoint": kwargs.get("sam_checkpoint"),
+                "dataset_root": kwargs.get("dataset_root"),
+            }
         else:
-            overrides = build_prompted_train_overrides(
-                run_name=run_name,
-                dataset=dataset,
-                dataset_root=data_root,
-                max_steps=1 if smoke_test else max_steps,
-                wandb_mode="disabled" if smoke_test else wandb_mode,
-                gaussian_weights=gaussian_path,
-                sam_checkpoint=sam_path,
-                val_interval=10_000 if smoke_test else val_interval,
-                batch_size=1 if smoke_test else batch_size,
-                prompt_strategy=prompt_strategy,
-                prompted_seg_loss_weight=prompted_seg_loss_weight,
-                min_object_pixels=min_object_pixels,
-                resume=None if smoke_test else resume,
-                smoke_scene=smoke_scene if smoke_test else None,
-            )
-            if smoke_test:
-                overrides.extend(
-                    [
-                        "data_loader.train.num_workers=0",
-                        "checkpointing.every_n_train_steps=1000000",
-                    ]
-                )
+            remote_fn = train_c3g_sam_feature
+            call_kwargs = {
+                "run_name": run_name,
+                "dataset": dataset,
+                "smoke_test": smoke_test,
+                "test": test,
+                **kwargs,
+            }
 
-        cmd = _build_main_command(overrides)
-        print("Running:", " ".join(shlex.quote(part) for part in cmd))
-        subprocess.run(cmd, check=True, cwd=str(WORKSPACE))
-
-        run_dir = OUTPUT_MOUNT / "runs" / run_name
-        output_volume.commit()
-        label = "Smoke test" if smoke_test else "Test" if test else "Training"
-        print(f"{label} complete. Artifacts under {run_dir} (volume `{OUTPUT_VOLUME}`).")
-        return str(run_dir)
+        mode_label = "smoke test" if smoke_test else "test" if test else "training"
+        result = dispatch_remote(
+            remote_fn,
+            detach=use_detach,
+            job_name=f"C3G-F SAM {mode_label} ({run_name}, {dataset})",
+            app_name=APP_NAME,
+            **call_kwargs,
+        )
+        if use_detach:
+            return
+        print(f"Remote run finished: {result}")
 
     @app.local_entrypoint()
     def modal_main(
@@ -279,26 +420,16 @@ try:
         min_object_pixels: int = 16,
         smoke_test: bool = False,
         test: bool = False,
-        detach: bool = False,
+        detach: bool | None = None,
+        wait: bool = False,
     ) -> None:
-        from src.misc.modal_run import dispatch_remote
-
-        if dataset not in DATASET_SPECS:
-            print(
-                f"Unknown dataset {dataset!r}; choose one of: {', '.join(DATASET_SPECS)}",
-                file=sys.stderr,
-            )
-            raise SystemExit(2)
-
-        if test and not resume:
-            print("--test requires --resume with a checkpoint path.", file=sys.stderr)
-            raise SystemExit(2)
-
-        mode_label = "smoke test" if smoke_test else "test" if test else "training"
-        result = dispatch_remote(
-            train_c3g_sam_feature,
+        _dispatch_c3g_sam(
             run_name=run_name,
             dataset=dataset,
+            smoke_test=smoke_test,
+            test=test,
+            detach=detach,
+            wait=wait,
             max_steps=max_steps,
             wandb_mode=wandb_mode,
             resume=resume,
@@ -310,16 +441,32 @@ try:
             prompt_strategy=prompt_strategy,
             prompted_seg_loss_weight=prompted_seg_loss_weight,
             min_object_pixels=min_object_pixels,
-            smoke_test=smoke_test,
-            test=test,
-            detach=detach,
-            job_name=f"C3G-F SAM {mode_label} ({run_name}, {dataset})",
-            app_name=APP_NAME,
         )
-        if detach:
-            return
-        print(f"Remote run finished: {result}")
+
+    @app.local_entrypoint()
+    def smoke(
+        dataset: DatasetName = "replica",
+        run_name: str | None = None,
+        gaussian_weights: str | None = None,
+        sam_checkpoint: str | None = None,
+        dataset_root: str | None = None,
+        wait: bool = False,
+        detach: bool | None = None,
+    ) -> None:
+        """Detached one-step training smoke test on Modal GPU (no local GPU/data)."""
+        _dispatch_c3g_sam(
+            run_name=run_name or f"sam_smoke_{dataset}",
+            dataset=dataset,
+            smoke_test=True,
+            test=False,
+            detach=detach,
+            wait=wait,
+            gaussian_weights=gaussian_weights,
+            sam_checkpoint=sam_checkpoint,
+            dataset_root=dataset_root,
+        )
 
 except ImportError:
     app = None  # type: ignore[assignment]
     modal_main = None  # type: ignore[assignment,misc]
+    smoke = None  # type: ignore[assignment,misc]

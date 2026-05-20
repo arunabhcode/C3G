@@ -173,14 +173,18 @@ modal run src/inference/modal_train_c3g_sam.py \
     --run-name sam_prompted_scannet --dataset scannet
 ```
 
-Smoke test (one training step on the first indexed scene; no checkpoint required):
+Smoke tests run **detached on Modal GPU** by default (no local GPU, dataset, or blocking wait). Use `--wait` to block until completion.
+
+Training smoke (one step on the first indexed scene; no checkpoint):
 
 ```bash
-modal run src/inference/modal_train_c3g_sam.py --smoke-test --dataset replica
-modal run src/inference/modal_train_c3g_sam.py --smoke-test --dataset scannet
+modal run src/inference/modal_train_c3g_sam.py::smoke --dataset replica
+modal run src/inference/modal_train_c3g_sam.py::smoke --dataset scannet
 ```
 
-Eval smoke test (one test batch; requires `--resume` with a trained checkpoint):
+Follow logs: `modal app logs c3g-train-sam-feature`
+
+Eval smoke (one test batch; detached by default; requires `--resume`):
 
 ```bash
 modal run src/inference/modal_train_c3g_sam.py \
@@ -189,13 +193,19 @@ modal run src/inference/modal_train_c3g_sam.py \
     --resume /outputs/runs/sam_prompted_replica/checkpoints/last.ckpt
 ```
 
-Vanilla SAM on one dataset frame (`src/inference/modal_vanilla_sam.py`):
+Vanilla SAM on one dataset frame:
 
 ```bash
-modal run src/inference/modal_vanilla_sam.py --smoke-test --dataset replica
+modal run src/inference/modal_vanilla_sam.py::smoke --dataset replica
 ```
 
-Use `modal run --detach …` for long jobs. Shared volume paths and Hydra overrides live in `src/inference/modal_sam_common.py`.
+C3G SAM decoder only (random features):
+
+```bash
+modal run src/inference/modal_c3g_sam.py::smoke
+```
+
+Use `modal run --detach …` for full training jobs. Shared volume paths and Hydra overrides live in `src/inference/modal_sam_common.py`.
 
 ### Key training parameters
 

@@ -9,13 +9,11 @@ Deploy the HTTP endpoint::
 
     modal deploy src/inference/modal_c3g_sam.py
 
-Run a remote smoke test (random feature tensor)::
+Run a detached smoke test on Modal GPU (random feature tensor; no local GPU)::
+
+    modal run src/inference/modal_c3g_sam.py::smoke
 
     modal run src/inference/modal_c3g_sam.py --smoke-test
-
-Run detached::
-
-    modal run --detach src/inference/modal_c3g_sam.py --smoke-test
 
 Upload SAM weights to the Modal volume (once)::
 
@@ -39,6 +37,7 @@ from src.inference.modal_sam_common import (
     DEFAULT_SAM_CHECKPOINT,
     WEIGHTS_MOUNT,
     WEIGHTS_VOLUME,
+    resolve_detach,
 )
 
 APP_NAME = "c3g-sam-pipeline"
@@ -205,6 +204,13 @@ try:
         def decode(self, payload: dict[str, Any]) -> dict[str, Any]:
             return _run_c3g_sam_decode(self.mask_decoder, self.device, payload)
 
+        @modal.method()
+        def smoke_decode(self) -> dict[str, Any]:
+            """Decode one random feature map on Modal GPU (no local inputs)."""
+            return _run_c3g_sam_decode(
+                self.mask_decoder, self.device, _smoke_test_payload()
+            )
+
         @modal.fastapi_endpoint(method="POST", docs=True)
         def web(self):
             from fastapi import FastAPI
@@ -232,25 +238,37 @@ try:
 
             return api
 
-    @app.local_entrypoint()
-    def modal_main(smoke_test: bool = False, detach: bool = False) -> None:
+    def _dispatch_smoke(*, detach: bool | None, wait: bool) -> None:
         from src.misc.modal_run import dispatch_remote
 
-        if not smoke_test:
-            print("Pass --smoke-test to run a remote decode on random Bx256x64x64 features.")
-            return
-
+        use_detach = resolve_detach(detach=detach, remote_job=not wait)
         result = dispatch_remote(
-            C3GSAMPipeline().decode,
-            _smoke_test_payload(),
-            detach=detach,
-            job_name="C3G SAM decode",
+            C3GSAMPipeline().smoke_decode,
+            detach=use_detach,
+            job_name="C3G SAM decode smoke",
             app_name=APP_NAME,
         )
-        if detach:
+        if use_detach:
             return
         print("OK — logits shape", result["logits"]["shape"])
+
+    @app.local_entrypoint()
+    def modal_main(
+        smoke_test: bool = False,
+        detach: bool | None = None,
+        wait: bool = False,
+    ) -> None:
+        if not smoke_test:
+            print("Pass --smoke-test or use entrypoint ::smoke for a detached Modal GPU run.")
+            return
+        _dispatch_smoke(detach=detach, wait=wait)
+
+    @app.local_entrypoint()
+    def smoke(detach: bool | None = None, wait: bool = False) -> None:
+        """Detached SAM decoder smoke test on Modal GPU."""
+        _dispatch_smoke(detach=detach, wait=wait)
 
 except ImportError:
     app = None  # type: ignore[assignment]
     modal_main = None  # type: ignore[assignment,misc]
+    smoke = None  # type: ignore[assignment,misc]

@@ -49,6 +49,13 @@ def resolve_dataset_root(dataset: DatasetName, dataset_root: str | None) -> str:
     return dataset_root or DATASET_SPECS[dataset]["default_root"]
 
 
+def resolve_detach(*, detach: bool | None, remote_job: bool) -> bool:
+    """Smoke/remote jobs detach by default; pass ``detach=False`` or ``--wait`` to block."""
+    if detach is not None:
+        return detach
+    return remote_job
+
+
 def find_smoke_scene(dataset_root: str | Path) -> str:
     """Return the first scene id listed in ``selected_seqs_test.json``."""
     root = Path(dataset_root)

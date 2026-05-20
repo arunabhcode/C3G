@@ -5,17 +5,14 @@ Deploy the HTTP endpoint::
 
     modal deploy src/inference/modal_vanilla_sam.py
 
-Run a remote smoke test on one dataset frame (Replica or ScanNet 2dseg volume)::
+Detached smoke test on one dataset frame (Modal GPU; no local image/GPU)::
 
-    modal run src/inference/modal_vanilla_sam.py --smoke-test --dataset replica
+    modal run src/inference/modal_vanilla_sam.py::smoke --dataset replica
+    modal run src/inference/modal_vanilla_sam.py::smoke --dataset scannet
 
-Run with a local image file::
+Optional local image (reads file on your machine before upload)::
 
     modal run src/inference/modal_vanilla_sam.py --image-path path/to.jpg
-
-Run detached::
-
-    modal run --detach src/inference/modal_vanilla_sam.py --smoke-test --dataset scannet
 
 Upload SAM weights to the Modal volume (once)::
 
@@ -46,8 +43,8 @@ from src.inference.modal_sam_common import (
     WEIGHTS_MOUNT,
     WEIGHTS_VOLUME,
     DatasetName,
-    find_smoke_frame,
     resolve_dataset_root,
+    resolve_detach,
 )
 
 APP_NAME = "c3g-vanilla-sam"
@@ -280,6 +277,56 @@ try:
 
             return api
 
+    def _dispatch_smoke_frame(
+        *,
+        dataset: DatasetName,
+        dataset_root: str | None,
+        segment_everything: bool,
+        detach: bool | None,
+        wait: bool,
+    ) -> None:
+        from src.misc.modal_run import dispatch_remote
+
+        use_detach = resolve_detach(detach=detach, remote_job=not wait)
+        result = dispatch_remote(
+            VanillaSAMInference().predict_smoke_frame,
+            dataset=dataset,
+            dataset_root=dataset_root,
+            segment_everything=segment_everything,
+            detach=use_detach,
+            job_name=f"vanilla SAM smoke ({dataset})",
+            app_name=APP_NAME,
+        )
+        if use_detach:
+            return
+        print(f"OK — masks shape {result['masks']['shape']}")
+        print(f"IoU heads: {result['iou_predictions']}")
+        if "smoke_frame" in result:
+            print(f"Frame: {result['smoke_frame']}")
+
+    @app.local_entrypoint()
+    def smoke(
+        dataset: DatasetName = "replica",
+        dataset_root: str | None = None,
+        segment_everything: bool = False,
+        detach: bool | None = None,
+        wait: bool = False,
+    ) -> None:
+        """Detached one-image SAM smoke test using the dataset volume on Modal GPU."""
+        if dataset not in DATASET_SPECS:
+            print(
+                f"Unknown dataset {dataset!r}; choose one of: {', '.join(DATASET_SPECS)}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        _dispatch_smoke_frame(
+            dataset=dataset,
+            dataset_root=dataset_root,
+            segment_everything=segment_everything,
+            detach=detach,
+            wait=wait,
+        )
+
     @app.local_entrypoint()
     def modal_main(
         image_path: str | None = None,
@@ -287,7 +334,8 @@ try:
         dataset_root: str | None = None,
         segment_everything: bool = False,
         smoke_test: bool = False,
-        detach: bool = False,
+        detach: bool | None = None,
+        wait: bool = False,
     ) -> None:
         from src.misc.modal_run import dispatch_remote
 
@@ -299,49 +347,47 @@ try:
             raise SystemExit(2)
 
         if smoke_test:
-            result = dispatch_remote(
-                VanillaSAMInference().predict_smoke_frame,
+            _dispatch_smoke_frame(
                 dataset=dataset,
                 dataset_root=dataset_root,
                 segment_everything=segment_everything,
                 detach=detach,
-                job_name=f"vanilla SAM smoke ({dataset})",
-                app_name=APP_NAME,
+                wait=wait,
             )
-        else:
-            if not image_path:
-                print(
-                    "Provide --image-path for a local image, or --smoke-test to use one "
-                    f"frame from the {dataset} volume.",
-                    file=sys.stderr,
-                )
-                raise SystemExit(2)
+            return
 
-            image_file = Path(image_path)
-            if not image_file.is_file():
-                print(f"Image not found: {image_file}", file=sys.stderr)
-                raise SystemExit(1)
-
-            payload = {
-                "images_b64": [base64.b64encode(image_file.read_bytes()).decode("ascii")],
-                "segment_everything": segment_everything,
-                "multimask_output": True,
-            }
-            result = dispatch_remote(
-                VanillaSAMInference().predict,
-                payload,
-                detach=detach,
-                job_name="vanilla SAM predict",
-                app_name=APP_NAME,
+        if not image_path:
+            print(
+                "Use entrypoint ::smoke for a detached Modal GPU run on one dataset frame, "
+                "or pass --image-path for a local file.",
+                file=sys.stderr,
             )
+            raise SystemExit(2)
 
-        if detach:
+        image_file = Path(image_path)
+        if not image_file.is_file():
+            print(f"Image not found: {image_file}", file=sys.stderr)
+            raise SystemExit(1)
+
+        payload = {
+            "images_b64": [base64.b64encode(image_file.read_bytes()).decode("ascii")],
+            "segment_everything": segment_everything,
+            "multimask_output": True,
+        }
+        use_detach = resolve_detach(detach=detach, remote_job=False)
+        result = dispatch_remote(
+            VanillaSAMInference().predict,
+            payload,
+            detach=use_detach,
+            job_name="vanilla SAM predict",
+            app_name=APP_NAME,
+        )
+        if use_detach:
             return
         print(f"OK — masks shape {result['masks']['shape']}")
         print(f"IoU heads: {result['iou_predictions']}")
-        if smoke_test and "smoke_frame" in result:
-            print(f"Frame: {result['smoke_frame']}")
 
 except ImportError:
     app = None  # type: ignore[assignment]
     modal_main = None  # type: ignore[assignment,misc]
+    smoke = None  # type: ignore[assignment,misc]
