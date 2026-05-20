@@ -1,0 +1,11 @@
+# @package _global_
+# Alias for prompted SAM training on flat 2D-seg volumes (replica_2dseg / scannet_2dseg).
+# Prefer +training=feature_head_sam_prompted with +dataset@_group_.replica_2dseg or scannet_2dseg
+# (see src/inference/modal_sam_common.py). For non-prompted SAM distillation use feature_head_sam.
+
+defaults:
+  - feature_head_sam_prompted
+
+wandb:
+  name: sam_2dseg
+  tags: [sam, 2dseg, 256x256, prompted]

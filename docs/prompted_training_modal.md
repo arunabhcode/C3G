@@ -30,7 +30,7 @@ modal volume put c3g-weights /path/to/gaussian_decoder.ckpt gaussian_decoder.ckp
 
 ## Populate dataset volumes
 
-Both datasets share the same **flat** on-disk layout: one directory per scene, frames named `{frame_id}_x.jpg`, `{frame_id}_y.png`, `{frame_id}_cam.npz`, plus `selected_seqs_test.json` at the volume root. ScanNet also includes `scannetv2-labels.combined.tsv`.
+Both datasets share the same **flat** on-disk layout: one directory per scene, frames named `{frame_id}_x.jpg`, `{frame_id}_y.png`, `{frame_id}_cam.npz`. Download scripts may also write `selected_seqs_test.json` at the volume root (optional; loaders discover scenes via `scenes` in config). ScanNet also includes `scannetv2-labels.combined.tsv`.
 
 ### Replica (`replica` volume → `/replica`)
 
@@ -84,7 +84,7 @@ Use `src/misc/modal_run.py` (`--detach`) for long download jobs; raw `.sens` arc
     └── ...
 ```
 
-Loaders: `replica_2dseg` (`src/dataset/dataset_replica_2dseg.py`), `scannet_2dseg` (`src/dataset/dataset_scannet_2dseg.py`).
+Loaders: `replica_2dseg` (`src/dataset/dataset_replica_2dseg.py`), `scannet_2dseg` (`src/dataset/dataset_scannet_2dseg.py`). They use the same sampling and batch layout as `dataset_replica_semseg` (random context/target pairs for train; full sweep for test).
 
 ## Training
 
@@ -97,26 +97,22 @@ Training runs in a CUDA image built from this repo (see `src/inference/modal_tra
 | `replica` | `/replica` | `dataset.replica_2dseg.roots=[/replica]` |
 | `scannet` | `/scannet` | `dataset.scannet_2dseg.roots=[/scannet]` |
 
-Start from `+training=feature_head_sam`, enable prompted loss, and point at the `replica_2dseg` or `scannet_2dseg` loader (same `train.*` prompted settings as `config/training/feature_head_sam_prompted.yaml`).
+Use `+training=feature_head_sam_prompted` with the `replica_2dseg` or `scannet_2dseg` dataset group (Modal CLI in `src/inference/modal_sam_common.py` sets this automatically). For non-prompted SAM feature distillation only, use `+training=feature_head_sam` instead.
 
 ### Replica
 
 ```bash
 python -m src.main \
-    +training=feature_head_sam \
+    +training=feature_head_sam_prompted \
     ~dataset@_group_.replica \
+    ~dataset@_group_.replica_semseg \
     +dataset@_group_.replica_2dseg=replica_2dseg \
-    train.prompt_mode=prompted \
-    train.prompted_seg_loss_weight=1.0 \
-    train.prompt_strategy=centroid \
-    train.min_object_pixels=16 \
     wandb.mode=online \
     wandb.name=sam_prompted_replica \
     hydra.run.dir=/outputs/runs/sam_prompted_replica \
     dataset.replica_2dseg.roots=[/replica] \
     train.sam_checkpoint=/weights/sam_vit_h.pth \
-    model.encoder.pretrained_weights=/weights/gaussian_decoder.ckpt \
-    train.feature_rendering_loss=0.01
+    model.encoder.pretrained_weights=/weights/gaussian_decoder.ckpt
 ```
 
 Use `model.encoder.pretrained_weights=/weights/model.pt` if `gaussian_decoder.ckpt` is not on the volume.
@@ -125,20 +121,16 @@ Use `model.encoder.pretrained_weights=/weights/model.pt` if `gaussian_decoder.ck
 
 ```bash
 python -m src.main \
-    +training=feature_head_sam \
+    +training=feature_head_sam_prompted \
     ~dataset@_group_.replica \
+    ~dataset@_group_.replica_semseg \
     +dataset@_group_.scannet_2dseg=scannet_2dseg \
-    train.prompt_mode=prompted \
-    train.prompted_seg_loss_weight=1.0 \
-    train.prompt_strategy=centroid \
-    train.min_object_pixels=16 \
     wandb.mode=online \
     wandb.name=sam_prompted_scannet \
     hydra.run.dir=/outputs/runs/sam_prompted_scannet \
     dataset.scannet_2dseg.roots=[/scannet] \
     train.sam_checkpoint=/weights/sam_vit_h.pth \
-    model.encoder.pretrained_weights=/weights/gaussian_decoder.ckpt \
-    train.feature_rendering_loss=0.01
+    model.encoder.pretrained_weights=/weights/gaussian_decoder.ckpt
 ```
 
 ### Common overrides
@@ -225,8 +217,9 @@ Evaluation uses grid prompts regardless of training `prompt_mode`. Example for R
 
 ```bash
 python -m src.main \
-    +training=feature_head_sam \
+    +training=feature_head_sam_prompted \
     ~dataset@_group_.replica \
+    ~dataset@_group_.replica_semseg \
     +dataset@_group_.replica_2dseg=replica_2dseg \
     mode=test \
     wandb.mode=online \

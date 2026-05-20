@@ -126,6 +126,9 @@ class DatasetScannet2dSeg(IterableDataset):
                 if idx % worker_info.num_workers == worker_info.id
             ]
 
+        if self.cfg.overfit_to_scene is not None:
+            scene_list = [s for s in scene_list if s == self.cfg.overfit_to_scene]
+
         for scene in scene_list:
             frame_ids = self.frame_ids[scene]
             num_frames = len(frame_ids)

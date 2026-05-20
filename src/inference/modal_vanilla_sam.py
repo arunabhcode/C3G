@@ -173,8 +173,9 @@ def _run_vanilla_sam_predict(
 
 
 def _load_smoke_image_bytes(dataset: DatasetName, dataset_root: str | None) -> tuple[bytes, str]:
+    spec = DATASET_SPECS[dataset]
     root = resolve_dataset_root(dataset, dataset_root)
-    scene_id, paths = find_smoke_frame(root)
+    scene_id, paths = find_smoke_frame(root, scenes=list(spec["scenes"]))  # type: ignore[arg-type]
     summary = f"{dataset} scene={scene_id} frame={paths.frame_id} ({paths.image.name})"
     return paths.image.read_bytes(), summary
 

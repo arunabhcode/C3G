@@ -2,9 +2,9 @@
 """Modal training for the C3G-F (feature) decoder with SAM mask-decoder head.
 
 Trains the Gaussian feature renderer + :class:`SAMMaskDecoderWrapper` pipeline using
-Hydra config ``+training=feature_head_sam`` with point-prompted segmentation loss on
-the ``replica_2dseg`` or ``scannet_2dseg`` loaders (flat frame layout from
-``download_replica.py`` / ``download_scannet.py``).
+Hydra config ``+training=feature_head_sam_prompted`` on the ``replica_2dseg`` or
+``scannet_2dseg`` loaders (flat frame layout from ``download_replica.py`` /
+``download_scannet.py``).
 
 Prerequisites on Modal volumes::
 
@@ -194,8 +194,11 @@ def _execute_c3g_sam_job(
 
     smoke_scene: str | None = None
     if smoke_test or test:
-        smoke_scene = find_smoke_scene(data_root)
-        print(f"Smoke scene (first in index): {smoke_scene}")
+        smoke_scene = find_smoke_scene(
+            data_root,
+            scenes=list(spec["scenes"]),  # type: ignore[arg-type]
+        )
+        print(f"Smoke scene: {smoke_scene}")
 
     if test:
         if not resume:
