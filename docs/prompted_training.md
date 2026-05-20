@@ -43,7 +43,7 @@ Expected directory structure:
 │   │   │   ├── frame000000.jpg
 │   │   │   ├── depth000000.png
 │   │   │   └── ...
-│   │   └── traj.txt
+│   │   └── traj.txt 
 │   ├── office1/
 │   │   └── ...
 │   └── room2/
@@ -93,15 +93,17 @@ uv run python -m src.main +training=feature_head_sam_prompted wandb.mode=disable
 
 ### Key Training Parameters
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `train.prompt_mode` | `prompted` | Use point prompts from GT labels |
-| `train.prompted_seg_loss_weight` | `1.0` | Weight for the prompted segmentation loss |
-| `train.prompt_strategy` | `centroid` | `centroid` or `random_point` |
-| `train.min_object_pixels` | `16` | Minimum foreground pixels for valid prompt |
-| `train.sam_model_variant` | `sam_vit_h` | SAM model variant |
-| `train.use_lora` | `false` | Enable LoRA adaptation on SAM decoder |
-| `train.lora_rank` | `4` | LoRA rank (if enabled) |
+
+| Parameter                        | Default     | Description                                |
+| -------------------------------- | ----------- | ------------------------------------------ |
+| `train.prompt_mode`              | `prompted`  | Use point prompts from GT labels           |
+| `train.prompted_seg_loss_weight` | `1.0`       | Weight for the prompted segmentation loss  |
+| `train.prompt_strategy`          | `centroid`  | `centroid` or `random_point`               |
+| `train.min_object_pixels`        | `16`        | Minimum foreground pixels for valid prompt |
+| `train.sam_model_variant`        | `sam_vit_h` | SAM model variant                          |
+| `train.use_lora`                 | `false`     | Enable LoRA adaptation on SAM decoder      |
+| `train.lora_rank`                | `4`         | LoRA rank (if enabled)                     |
+
 
 ## Evaluation (Segment-Everything Mode)
 
@@ -143,3 +145,4 @@ When `wandb.mode=online`, the following metrics are logged:
 - `loss/total` — combined training loss
 - Standard reconstruction losses (MSE, LPIPS) if enabled
 - Multi-view IoU metrics during validation
+

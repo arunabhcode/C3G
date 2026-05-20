@@ -48,6 +48,7 @@ DATASET_SPECS: dict[DatasetName, dict[str, str | list[str]]] = {
         "hydra_add": "replica_2dseg=replica_2dseg",
         "roots_key": "dataset.replica_2dseg.roots",
         "overfit_key": "dataset.replica_2dseg.overfit_to_scene",
+        # Prepared flat-frame Replica dataset lives on the Modal volume mounted here.
         "default_root": str(REPLICA_MOUNT),
         "volume": REPLICA_VOLUME,
         "label": "Replica",
@@ -154,8 +155,11 @@ def build_sam_train_overrides(
     run_dir = output_mount / "runs" / run_name
     overrides = [
         f"+training={training_config}",
+        # Drop the default Replica loaders before adding the flat 2D segmentation loader.
         "~dataset@_group_.replica",
         "~dataset@_group_.replica_semseg",
+        "~dataset@_group_.scannet",
+        "~dataset@_group_.scannet_semseg",
         f"+dataset@_group_.{spec['hydra_add']}",
         f"wandb.mode={wandb_mode}",
         f"wandb.name={run_name}",
@@ -238,8 +242,11 @@ def build_prompted_test_overrides(
     run_dir = output_mount / "runs" / run_name
     overrides = [
         f"+training={training_config}",
+        # Drop the default 3D/semseg loaders before adding the flat 2D segmentation loader.
         "~dataset@_group_.replica",
         "~dataset@_group_.replica_semseg",
+        "~dataset@_group_.scannet",
+        "~dataset@_group_.scannet_semseg",
         f"+dataset@_group_.{spec['hydra_add']}",
         "mode=test",
         f"wandb.mode={wandb_mode}",
