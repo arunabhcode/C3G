@@ -1,6 +1,6 @@
 # Prompted Training with SAM on Replica and ScanNet (Modal)
 
-Train C3G-F with point-prompted SAM segmentation loss on [Modal](https://modal.com/) using the prepared **`replica`** and **`scannet`** volumes. Data layout matches `src/dataset/frame_layout.py` and the download scripts `src/dataset/download_replica.py` and `src/dataset/download_scannet.py`.
+Train C3G-F with point-prompted SAM segmentation loss on [Modal](https://modal.com/) using the prepared **`replica`** and **`scannet`** volumes. Data layout matches `src/misc/frame_layout.py` and the download scripts `src/dataset/download_replica.py` and `src/dataset/download_scannet.py`.
 
 ## Prerequisites
 

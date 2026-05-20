@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Literal
 
-from src.dataset.frame_layout import FramePaths, list_frame_ids
+from src.misc.frame_layout import FramePaths, list_frame_ids
 
 DatasetName = Literal["replica", "scannet"]
 

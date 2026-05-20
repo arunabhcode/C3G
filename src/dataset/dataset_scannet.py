@@ -19,7 +19,7 @@ import numpy as np
 
 from ..geometry.projection import get_fov
 from .dataset import DatasetCfgCommon
-from .frame_layout import FramePaths
+from ..misc.frame_layout import FramePaths
 from .shims.augmentation_shim import apply_augmentation_shim
 from .shims.crop_shim import apply_crop_shim
 from .types import Stage

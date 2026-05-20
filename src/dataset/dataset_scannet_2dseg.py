@@ -6,7 +6,7 @@ Expects data prepared by :mod:`download_scannet`::
     <root>/<scene_id>/{frame_id}_cam.npz
     <root>/<scene_id>/{frame_id}_y.png
 
-See :mod:`frame_layout` for naming conventions.
+See :mod:`src.misc.frame_layout` for naming conventions.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from .cropping import (
     rescale_image_depthmap,
 )
 from .dataset import DatasetCfgCommon
-from .frame_layout import FramePaths
+from ..misc.frame_layout import FramePaths
 from .types import Stage
 from .view_sampler import ViewSampler
 
