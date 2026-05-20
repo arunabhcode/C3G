@@ -189,6 +189,12 @@ Vanilla SAM on one dataset frame (GT point prompts; same ``PromptSampler`` as C3
 modal run src/inference/modal_vanilla_sam.py::smoke --dataset replica --wait
 ```
 
+Full vanilla SAM eval (every frame; masks on ``sam-eval-outputs``):
+
+```bash
+modal run src/inference/modal_vanilla_sam.py::main --dataset replica --run-name vanilla_sam_replica --wait
+```
+
 Use `modal run --detach …` for full training jobs. Shared volume paths and Hydra overrides live in `src/inference/modal_sam_common.py`.
 
 ### Key training parameters

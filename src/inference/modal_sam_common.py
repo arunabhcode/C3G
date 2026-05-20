@@ -188,6 +188,31 @@ def find_smoke_frame(
     return scene_id, paths
 
 
+def iter_dataset_frames(
+    dataset_root: str | Path,
+    scenes: list[str],
+) -> list[tuple[str, FramePaths]]:
+    """List every (scene_id, frame paths) with image + label on disk."""
+    from src.misc.frame_layout import FramePaths, list_frame_ids
+
+    root = Path(dataset_root)
+    frames: list[tuple[str, FramePaths]] = []
+    for scene_id in scenes:
+        scene_dir = root / scene_id
+        if not scene_dir.is_dir():
+            continue
+        for frame_id in list_frame_ids(scene_dir):
+            paths = FramePaths.from_frame_id(scene_dir, frame_id)
+            if paths.image.is_file() and paths.label.is_file():
+                frames.append((scene_id, paths))
+    if not frames:
+        raise FileNotFoundError(
+            f"No labeled frames found under {root} for scenes {scenes}. "
+            "Run the dataset download script to populate the volume."
+        )
+    return frames
+
+
 def build_sam_train_overrides(
     *,
     run_name: str,

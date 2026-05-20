@@ -11,6 +11,10 @@ Smoke test on one dataset frame (Modal GPU)::
 
     modal run src/inference/modal_vanilla_sam.py::smoke --dataset replica --wait
 
+Full dataset eval (saves masks to ``sam-eval-outputs`` volume)::
+
+    modal run src/inference/modal_vanilla_sam.py::main --dataset replica --wait
+
 Local image + matching ``*_y.png`` label::
 
     modal run src/inference/modal_vanilla_sam.py \\
@@ -133,6 +137,29 @@ def _run_vanilla_sam_predict(
     return response
 
 
+def _masks_from_response(masks_payload: dict[str, Any]):
+    import numpy as np
+
+    shape = tuple(masks_payload["shape"])
+    raw = base64.b64decode(masks_payload["masks_b64"])
+    return np.frombuffer(raw, dtype=np.uint8).reshape(shape)
+
+
+def _best_mask_from_response(result: dict[str, Any]):
+    import numpy as np
+
+    masks = _masks_from_response(result["masks"])
+    ious = np.asarray(result["iou_predictions"][0])
+    return masks[0, int(np.argmax(ious))]
+
+
+def _save_mask_png(mask, path: Path) -> None:
+    from PIL import Image
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray((mask.astype("uint8") * 255)).save(path)
+
+
 def _load_smoke_frame(
     dataset: str,
     dataset_root: str | None,
@@ -214,12 +241,16 @@ try:
         DATASET_SPECS,
         REPLICA_MOUNT,
         REPLICA_VOLUME,
+        SAM_EVAL_OUTPUT_MOUNT,
+        SAM_EVAL_OUTPUT_VOLUME,
         SCANNET_MOUNT,
         SCANNET_VOLUME,
         WEIGHTS_MOUNT,
         WEIGHTS_VOLUME,
         DatasetName,
         build_vanilla_sam_modal_image,
+        iter_dataset_frames,
+        resolve_dataset_root,
         resolve_detach,
         resolve_sam_checkpoint,
     )
@@ -228,6 +259,7 @@ try:
     weights_volume = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
     replica_volume = modal.Volume.from_name(REPLICA_VOLUME, create_if_missing=True)
     scannet_volume = modal.Volume.from_name(SCANNET_VOLUME, create_if_missing=True)
+    eval_output_volume = modal.Volume.from_name(SAM_EVAL_OUTPUT_VOLUME, create_if_missing=True)
     inference_image = build_vanilla_sam_modal_image()
 
     @app.cls(
@@ -237,8 +269,9 @@ try:
             str(WEIGHTS_MOUNT): weights_volume,
             str(REPLICA_MOUNT): replica_volume,
             str(SCANNET_MOUNT): scannet_volume,
+            str(SAM_EVAL_OUTPUT_MOUNT): eval_output_volume,
         },
-        timeout=60 * 30,
+        timeout=60 * 60 * 2,
         scaledown_window=300,
     )
     class VanillaSAMInference:
@@ -287,6 +320,72 @@ try:
             if payload.get("point_coords"):
                 result["point_coords"] = payload["point_coords"]
             return result
+
+        @modal.method()
+        def eval_dataset(
+            self,
+            run_name: str,
+            dataset: DatasetName = "replica",
+            dataset_root: str | None = None,
+            prompt_strategy: str = "centroid",
+            min_object_pixels: int = 16,
+        ) -> str:
+            """Run vanilla SAM on every frame and write masks to ``sam-eval-outputs``."""
+            import json
+
+            spec = DATASET_SPECS[dataset]
+            root = Path(resolve_dataset_root(dataset, dataset_root))
+            if not root.is_dir():
+                raise FileNotFoundError(f"Dataset root not found: {root}")
+
+            run_dir = SAM_EVAL_OUTPUT_MOUNT / "runs" / run_name
+            pred_root = run_dir
+            frames = iter_dataset_frames(root, list(spec["scenes"]))  # type: ignore[arg-type]
+
+            saved = 0
+            skipped = 0
+            for index, (scene_id, paths) in enumerate(frames):
+                if index % 50 == 0:
+                    print(f"Progress {index}/{len(frames)} — {scene_id}/{paths.frame_id}")
+
+                try:
+                    payload = _build_predict_payload(
+                        paths.image.read_bytes(),
+                        label_path=paths.label,
+                        prompt_strategy=prompt_strategy,
+                        min_object_pixels=min_object_pixels,
+                    )
+                except ValueError as exc:
+                    print(f"Skip {scene_id}/{paths.frame_id}: {exc}")
+                    skipped += 1
+                    continue
+
+                result = _run_vanilla_sam_predict(self.sam, self.device, payload)
+                mask = _best_mask_from_response(result)
+                out_path = pred_root / scene_id / "seg" / f"{paths.frame_id}.png"
+                _save_mask_png(mask, out_path)
+                saved += 1
+
+            manifest = {
+                "run_name": run_name,
+                "dataset": dataset,
+                "dataset_root": str(root),
+                "prompt_strategy": prompt_strategy,
+                "min_object_pixels": min_object_pixels,
+                "saved_frames": saved,
+                "skipped_frames": skipped,
+            }
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "manifest.json").write_text(
+                json.dumps(manifest, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            eval_output_volume.commit()
+
+            print(f"Eval complete — saved {saved} masks ({skipped} skipped).")
+            print(f"  Output root: {pred_root} (volume `{SAM_EVAL_OUTPUT_VOLUME}`)")
+            print(f"  Per-frame masks: {pred_root}/<scene>/seg/<frame_id>.png")
+            return str(pred_root)
 
         @modal.fastapi_endpoint(method="POST", docs=True)
         def web(self):
@@ -349,6 +448,61 @@ try:
         if result.get("point_coords"):
             print(f"GT prompt: {result['point_coords']}")
 
+    def _dispatch_eval_dataset(
+        *,
+        run_name: str,
+        dataset: DatasetName,
+        dataset_root: str | None,
+        prompt_strategy: str,
+        min_object_pixels: int,
+        detach: bool | None,
+        wait: bool,
+    ) -> None:
+        from src.misc.modal_run import dispatch_remote
+
+        use_detach = resolve_detach(detach=detach, remote_job=not wait)
+        result = dispatch_remote(
+            VanillaSAMInference().eval_dataset,
+            run_name=run_name,
+            dataset=dataset,
+            dataset_root=dataset_root,
+            prompt_strategy=prompt_strategy,
+            min_object_pixels=min_object_pixels,
+            detach=use_detach,
+            job_name=f"vanilla SAM eval ({run_name}, {dataset})",
+            app_name=APP_NAME,
+        )
+        if use_detach:
+            return
+        print(f"Remote run finished: {result}")
+
+    @app.local_entrypoint()
+    def main(
+        run_name: str = "vanilla_sam_replica",
+        dataset: DatasetName = "replica",
+        dataset_root: str | None = None,
+        prompt_strategy: str = "centroid",
+        min_object_pixels: int = 16,
+        detach: bool | None = None,
+        wait: bool = True,
+    ) -> None:
+        """Full-dataset vanilla SAM eval; writes masks to ``sam-eval-outputs``."""
+        if dataset not in DATASET_SPECS:
+            print(
+                f"Unknown dataset {dataset!r}; choose one of: {', '.join(DATASET_SPECS)}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        _dispatch_eval_dataset(
+            run_name=run_name,
+            dataset=dataset,
+            dataset_root=dataset_root,
+            prompt_strategy=prompt_strategy,
+            min_object_pixels=min_object_pixels,
+            detach=detach,
+            wait=wait,
+        )
+
     @app.local_entrypoint()
     def smoke(
         dataset: DatasetName = "replica",
@@ -407,12 +561,16 @@ try:
             return
 
         if not image_path:
-            print(
-                "Use entrypoint ::smoke for a detached Modal GPU run on one dataset frame, "
-                "or pass --image-path and --label-path for a local pair.",
-                file=sys.stderr,
+            _dispatch_eval_dataset(
+                run_name=f"vanilla_sam_{dataset}",
+                dataset=dataset,
+                dataset_root=dataset_root,
+                prompt_strategy=prompt_strategy,
+                min_object_pixels=min_object_pixels,
+                detach=detach,
+                wait=wait,
             )
-            raise SystemExit(2)
+            return
 
         image_file = Path(image_path)
         if not image_file.is_file():
@@ -448,5 +606,6 @@ try:
 
 except ImportError:
     app = None  # type: ignore[assignment]
+    main = None  # type: ignore[assignment,misc]
     modal_main = None  # type: ignore[assignment,misc]
     smoke = None  # type: ignore[assignment,misc]
