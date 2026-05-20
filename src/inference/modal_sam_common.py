@@ -322,6 +322,7 @@ CONFIG_H = (
     "submodules/diff_gaussian_rasterization_w_feature_detach/cuda_rasterizer/config.h"
 )
 C3G_MODAL_WORKSPACE = Path("/workspace")
+VANILLA_SAM_MODAL_ROOT = Path("/root")
 
 
 def repo_root_for_modal(start: Path | None = None) -> Path:
@@ -336,6 +337,45 @@ def repo_root_for_modal(start: Path | None = None) -> Path:
         return workspace
 
     raise RuntimeError(f"Could not find repo root from {here}")
+
+
+def build_vanilla_sam_modal_image(
+    *,
+    src_root: Path | None = None,
+    remote_root: Path = VANILLA_SAM_MODAL_ROOT,
+):
+    """Lightweight CUDA image for vanilla SAM inference on Modal.
+
+    Installs ``git`` before any pip git dependencies (same ordering as
+    :func:`build_c3g_modal_image`, which uses ``uv sync`` for segment-anything).
+    """
+    import modal
+
+    src = src_root or (repo_root_for_modal() / "src")
+    return (
+        modal.Image.debian_slim(python_version="3.11")
+        .apt_install("git", "ca-certificates")
+        .pip_install(
+            "numpy==1.26.4",
+            "pillow==11.0.0",
+            "fastapi==0.118.0",
+            "pydantic==2.11.4",
+        )
+        .pip_install(
+            "torch==2.5.1",
+            "torchvision==0.20.1",
+            index_url="https://download.pytorch.org/whl/cu124",
+        )
+        .pip_install(
+            "segment-anything @ git+https://github.com/facebookresearch/segment-anything.git",
+        )
+        .env({"PYTHONPATH": str(remote_root)})
+        .add_local_dir(
+            str(src),
+            remote_path=str(remote_root / "src"),
+            ignore=["**/__pycache__/**", "**/.DS_Store"],
+        )
+    )
 
 
 def build_c3g_modal_image(

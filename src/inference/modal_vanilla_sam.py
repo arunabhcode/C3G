@@ -33,39 +33,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from src.inference.modal_sam_common import DatasetName
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SRC_ROOT = REPO_ROOT / "src"
-
 APP_NAME = "c3g-vanilla-sam"
 DEFAULT_VARIANT = "sam_vit_h"
-
-
-def _build_image():
-    import modal
-
-    return (
-        modal.Image.debian_slim(python_version="3.11")
-        .pip_install(
-            "numpy==1.26.4",
-            "pillow==11.0.0",
-            "fastapi==0.118.0",
-            "pydantic==2.11.4",
-        )
-        .pip_install(
-            "torch==2.5.1",
-            "torchvision==0.20.1",
-            index_url="https://download.pytorch.org/whl/cu124",
-        )
-        .pip_install(
-            "segment-anything @ git+https://github.com/facebookresearch/segment-anything.git",
-        )
-        .add_local_dir(
-            str(SRC_ROOT),
-            remote_path="/root/src",
-            ignore=["**/__pycache__/**", "**/.DS_Store"],
-        )
-        .env({"PYTHONPATH": "/root"})
-    )
 
 
 @dataclass
@@ -250,6 +219,7 @@ try:
         WEIGHTS_MOUNT,
         WEIGHTS_VOLUME,
         DatasetName,
+        build_vanilla_sam_modal_image,
         resolve_detach,
         resolve_sam_checkpoint,
     )
@@ -258,7 +228,7 @@ try:
     weights_volume = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
     replica_volume = modal.Volume.from_name(REPLICA_VOLUME, create_if_missing=True)
     scannet_volume = modal.Volume.from_name(SCANNET_VOLUME, create_if_missing=True)
-    inference_image = _build_image()
+    inference_image = build_vanilla_sam_modal_image()
 
     @app.cls(
         image=inference_image,
