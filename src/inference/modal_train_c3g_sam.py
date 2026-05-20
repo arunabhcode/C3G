@@ -79,7 +79,14 @@ def _build_training_image():
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
             "echo 'export PATH=\"/root/.local/bin:$PATH\"' >> /root/.bashrc",
         )
-        .env({"PATH": "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"})
+        .env(
+            {
+                "PATH": "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                # Image build has no GPU; target A100-40GB (8.0) and A10G (8.6).
+                "TORCH_CUDA_ARCH_LIST": "8.0;8.6",
+                "FORCE_CUDA": "1",
+            }
+        )
         .add_local_dir(
             str(REPO_ROOT),
             remote_path=str(WORKSPACE),
@@ -98,8 +105,8 @@ def _build_training_image():
         .run_commands(
             f"sed -i 's/#define NUM_SEMANTIC_CHANNELS 512/#define NUM_SEMANTIC_CHANNELS {SAM_NUM_CHANNELS}/' {CONFIG_H}",
             "uv sync --frozen",
-            "uv run python -c \"from submodules.diff_gaussian_rasterization_w_feature_detach.diff_gaussian_rasterization import GaussianRasterizationSettings\"",
-            "uv run python -c \"from submodules.diff_gaussian_rasterization_w_pose.diff_gaussian_rasterization import GaussianRasterizationSettings\"",
+            "uv run python -c \"from submodules.diff_gaussian_rasterization_w_feature_detach.setup import _C\"",
+            "uv run python -c \"from submodules.diff_gaussian_rasterization_w_pose.setup import _C\"",
         )
         .env({"PYTHONPATH": str(WORKSPACE)})
     )
