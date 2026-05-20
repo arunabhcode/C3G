@@ -284,13 +284,14 @@ def build_prompted_test_overrides(
     run_name: str,
     dataset: DatasetName,
     dataset_root: str,
-    sam_checkpoint: str,
     checkpoint_path: str,
+    sam_checkpoint: str | Path | None = None,
     wandb_mode: str = "disabled",
     training_config: TrainingConfigName = TRAINING_CONFIG_PROMPTED,
     smoke_scene: str | None = None,
     output_mount: Path = OUTPUT_MOUNT,
 ) -> list[str]:
+    sam_path = resolve_sam_checkpoint(sam_checkpoint)
     spec = DATASET_SPECS[dataset]
     run_dir = output_mount / "runs" / run_name
     overrides = [
@@ -300,7 +301,7 @@ def build_prompted_test_overrides(
         f"wandb.mode={wandb_mode}",
         f"wandb.name={run_name}",
         f"hydra.run.dir={run_dir}",
-        f"train.sam_checkpoint={sam_checkpoint}",
+        f"train.sam_checkpoint={sam_path}",
         f"{spec['roots_key']}=[{dataset_root}]",
         "test.save_compare=true",
         "test.save_image=false",
@@ -311,3 +312,79 @@ def build_prompted_test_overrides(
     if smoke_scene is not None:
         overrides.append(f"{spec['overfit_key']}={smoke_scene}")
     return overrides
+
+
+CONFIG_H = (
+    "submodules/diff_gaussian_rasterization_w_feature_detach/cuda_rasterizer/config.h"
+)
+C3G_MODAL_WORKSPACE = Path("/workspace")
+
+
+def repo_root_for_modal(start: Path | None = None) -> Path:
+    """Locate the repo root when running locally or inside a Modal container."""
+    here = (start or Path(__file__)).resolve()
+    for candidate in (here.parent, *here.parents):
+        if (candidate / "pyproject.toml").is_file() and (candidate / "src").is_dir():
+            return candidate
+
+    workspace = C3G_MODAL_WORKSPACE
+    if (workspace / "pyproject.toml").is_file() and (workspace / "src").is_dir():
+        return workspace
+
+    raise RuntimeError(f"Could not find repo root from {here}")
+
+
+def build_c3g_modal_image(
+    *,
+    repo_root: Path | None = None,
+    workspace: Path = C3G_MODAL_WORKSPACE,
+):
+    """CUDA + uv image for full C3G Hydra runs on Modal (training or test)."""
+    import modal
+
+    root = repo_root or repo_root_for_modal()
+    return (
+        modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
+        .apt_install(
+            "git",
+            "curl",
+            "ca-certificates",
+            "build-essential",
+            "clang",
+            "libgl1",
+            "libglib2.0-0",
+        )
+        .run_commands(
+            "curl -LsSf https://astral.sh/uv/install.sh | sh",
+            "echo 'export PATH=\"/root/.local/bin:$PATH\"' >> /root/.bashrc",
+        )
+        .env(
+            {
+                "PATH": "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "TORCH_CUDA_ARCH_LIST": "8.0;8.6",
+                "FORCE_CUDA": "1",
+            }
+        )
+        .add_local_dir(
+            str(root),
+            remote_path=str(workspace),
+            copy=True,
+            ignore=[
+                "**/.git/**",
+                "**/__pycache__/**",
+                "**/.venv/**",
+                "**/datasets/**",
+                "**/outputs/**",
+                "**/.DS_Store",
+                "src/dataset/replica_data/replica_semseg/**",
+            ],
+        )
+        .workdir(str(workspace))
+        .run_commands(
+            f"sed -i 's/#define NUM_SEMANTIC_CHANNELS 512/#define NUM_SEMANTIC_CHANNELS {SAM_NUM_CHANNELS}/' {CONFIG_H}",
+            "uv sync --frozen",
+            "uv run --no-sync python -c \"from submodules.diff_gaussian_rasterization_w_feature_detach.setup import _C\"",
+            "uv run --no-sync python -c \"from submodules.diff_gaussian_rasterization_w_pose.setup import _C\"",
+        )
+        .env({"PYTHONPATH": str(workspace)})
+    )

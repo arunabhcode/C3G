@@ -179,9 +179,7 @@ Follow logs: `modal app logs c3g-train-sam-feature`
 Eval smoke (one test batch; detached by default; requires `--resume`):
 
 ```bash
-modal run src/inference/modal_train_c3g_sam.py \
-    --test --dataset replica \
-    --run-name sam_prompted_replica_eval \
+modal run src/inference/modal_c3g_sam.py::smoke --dataset replica \
     --resume /outputs/runs/sam_prompted_replica/checkpoints/last.ckpt
 ```
 
@@ -189,12 +187,6 @@ Vanilla SAM on one dataset frame:
 
 ```bash
 modal run src/inference/modal_vanilla_sam.py::smoke --dataset replica
-```
-
-C3G SAM decoder only (random features):
-
-```bash
-modal run src/inference/modal_c3g_sam.py::smoke
 ```
 
 Use `modal run --detach …` for full training jobs. Shared volume paths and Hydra overrides live in `src/inference/modal_sam_common.py`.

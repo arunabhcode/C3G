@@ -28,83 +28,20 @@ from pathlib import Path
 import modal
 
 from src.inference.modal_sam_common import (
+    C3G_MODAL_WORKSPACE,
     OUTPUT_MOUNT,
     OUTPUT_VOLUME,
     REPLICA_MOUNT,
     REPLICA_VOLUME,
-    SAM_NUM_CHANNELS,
     WEIGHTS_MOUNT,
     WEIGHTS_VOLUME,
+    build_c3g_modal_image,
     find_smoke_scene,
     resolve_training_weights,
 )
 
 APP_NAME = "c3g-sam-prompted-simple"
-WORKSPACE = Path("/workspace")
-CONFIG_H = "submodules/diff_gaussian_rasterization_w_feature_detach/cuda_rasterizer/config.h"
-
-
-def _repo_root() -> Path:
-    here = Path(__file__).resolve()
-    for candidate in (here.parent, *here.parents):
-        if (candidate / "pyproject.toml").is_file() and (candidate / "src").is_dir():
-            return candidate
-
-    # Modal imports this file as /root/simp.py inside the container, while the
-    # copied repository lives at /workspace.
-    workspace = Path("/workspace")
-    if (workspace / "pyproject.toml").is_file() and (workspace / "src").is_dir():
-        return workspace
-
-    raise RuntimeError(f"Could not find repo root from {here}")
-
-
-def _image() -> modal.Image:
-    return (
-        modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
-        .apt_install(
-            "git",
-            "curl",
-            "ca-certificates",
-            "build-essential",
-            "clang",
-            "libgl1",
-            "libglib2.0-0",
-        )
-        .run_commands(
-            "curl -LsSf https://astral.sh/uv/install.sh | sh",
-            "echo 'export PATH=\"/root/.local/bin:$PATH\"' >> /root/.bashrc",
-        )
-        .env(
-            {
-                "PATH": "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                "TORCH_CUDA_ARCH_LIST": "8.0;8.6",
-                "FORCE_CUDA": "1",
-            }
-        )
-        .add_local_dir(
-            str(_repo_root()),
-            remote_path=str(WORKSPACE),
-            copy=True,
-            ignore=[
-                "**/.git/**",
-                "**/__pycache__/**",
-                "**/.venv/**",
-                "**/datasets/**",
-                "**/outputs/**",
-                "**/.DS_Store",
-                "src/dataset/replica_data/replica_semseg/**",
-            ],
-        )
-        .workdir(str(WORKSPACE))
-        .run_commands(
-            f"sed -i 's/#define NUM_SEMANTIC_CHANNELS 512/#define NUM_SEMANTIC_CHANNELS {SAM_NUM_CHANNELS}/' {CONFIG_H}",
-            "uv sync --frozen",
-            "uv run --no-sync python -c \"from submodules.diff_gaussian_rasterization_w_feature_detach.setup import _C\"",
-            "uv run --no-sync python -c \"from submodules.diff_gaussian_rasterization_w_pose.setup import _C\"",
-        )
-        .env({"PYTHONPATH": str(WORKSPACE)})
-    )
+WORKSPACE = C3G_MODAL_WORKSPACE
 
 
 def _build_replica_prompted_overrides(
@@ -152,7 +89,7 @@ output_volume = modal.Volume.from_name(OUTPUT_VOLUME, create_if_missing=True)
 
 
 @app.function(
-    image=_image(),
+    image=build_c3g_modal_image(),
     gpu="A100-80GB",
     timeout=60 * 60 * 4,
     volumes={

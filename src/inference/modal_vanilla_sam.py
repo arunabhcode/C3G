@@ -16,7 +16,7 @@ Optional local image (reads file on your machine before upload)::
 
 Upload SAM weights to the Modal volume (once)::
 
-    modal volume put c3g-weights sam_vit_h.pth /path/to/sam_vit_h.pth
+    modal volume put c3g-weights /path/to/sam_vit_h.pth sam_vit_h.pth
 """
 
 from __future__ import annotations
@@ -186,7 +186,6 @@ try:
 
     from src.inference.modal_sam_common import (
         DATASET_SPECS,
-        DEFAULT_SAM_CHECKPOINT,
         REPLICA_MOUNT,
         REPLICA_VOLUME,
         SCANNET_MOUNT,
@@ -195,6 +194,7 @@ try:
         WEIGHTS_VOLUME,
         DatasetName,
         resolve_detach,
+        resolve_sam_checkpoint,
     )
 
     app = modal.App(APP_NAME)
@@ -223,12 +223,7 @@ try:
 
             from src.model.sam import load_sam
 
-            checkpoint_path = str(DEFAULT_SAM_CHECKPOINT)
-            if not Path(checkpoint_path).is_file():
-                raise FileNotFoundError(
-                    f"SAM checkpoint not found at {checkpoint_path}. "
-                    f"Upload with: modal volume put {WEIGHTS_VOLUME} sam_vit_h.pth <local.pth>"
-                )
+            checkpoint_path = str(resolve_sam_checkpoint())
 
             self.device = torch.device("cuda")
             self.sam = load_sam(

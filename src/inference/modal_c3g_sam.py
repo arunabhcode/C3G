@@ -1,279 +1,226 @@
 #!/usr/bin/env python3
-"""Modal inference interface for the C3G SAM mask-decoder pipeline.
+"""Modal runner for C3G-F + SAM evaluation (Hydra ``mode=test``).
 
-Decodes masks from rendered Gaussian features (Bx256x64x64) using
-:class:`src.model.sam_decoder.SAMMaskDecoderWrapper` — the SAM head used during
-C3G training/eval, not the full vanilla SAM image encoder.
+Runs one test batch on ``replica_2dseg`` or ``scannet_2dseg`` data from Modal
+volumes. Requires a trained checkpoint on the ``c3g-train-outputs`` volume.
 
-Deploy the HTTP endpoint::
+Prerequisites::
 
-    modal deploy src/inference/modal_c3g_sam.py
+    modal volume put c3g-weights /path/to/sam_vit_h.pth sam_vit_h.pth
+    modal run src/dataset/download_replica.py
 
-Run a detached smoke test on Modal GPU (random feature tensor; no local GPU)::
+Eval smoke (one batch, first scene; checkpoint on output volume)::
 
-    modal run src/inference/modal_c3g_sam.py::smoke
+    modal run src/inference/modal_c3g_sam.py::smoke --dataset replica \\
+        --resume /outputs/runs/sam_prompted_replica/checkpoints/last.ckpt
 
-    modal run src/inference/modal_c3g_sam.py --smoke-test
+Full eval (same Hydra overrides, not limited to smoke scene)::
 
-Upload SAM weights to the Modal volume (once)::
-
-    modal volume put c3g-weights sam_vit_h.pth /path/to/sam_vit_h.pth
+    modal run src/inference/modal_c3g_sam.py \\
+        --run-name sam_prompted_replica_eval --dataset replica \\
+        --resume /outputs/runs/sam_prompted_replica/checkpoints/last.ckpt
 """
 
 from __future__ import annotations
 
-import base64
+import shlex
+import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SRC_ROOT = REPO_ROOT / "src"
+import modal
 
-APP_NAME = "c3g-sam-pipeline"
-DEFAULT_VARIANT = "sam_vit_h"
+from src.inference.modal_sam_common import (
+    C3G_MODAL_WORKSPACE,
+    DATASET_SPECS,
+    OUTPUT_MOUNT,
+    OUTPUT_VOLUME,
+    REPLICA_MOUNT,
+    REPLICA_VOLUME,
+    SCANNET_MOUNT,
+    SCANNET_VOLUME,
+    WEIGHTS_MOUNT,
+    WEIGHTS_VOLUME,
+    DatasetName,
+    build_c3g_modal_image,
+    build_prompted_test_overrides,
+    find_smoke_scene,
+    resolve_dataset_root,
+    resolve_detach,
+    resolve_sam_checkpoint,
+)
+
+APP_NAME = "c3g-sam-inference"
 
 
-def _build_image():
-    import modal
-
-    return (
-        modal.Image.debian_slim(python_version="3.11")
-        .pip_install(
-            "numpy==1.26.4",
-            "einops==0.6.1",
-            "fastapi==0.118.0",
-            "pydantic==2.11.4",
-            "torch==2.5.1",
-            index_url="https://download.pytorch.org/whl/cu124",
+def _validate_eval_paths(
+    *,
+    dataset: DatasetName,
+    dataset_root: str,
+    resume: str,
+) -> None:
+    spec = DATASET_SPECS[dataset]
+    checkpoint = Path(resume)
+    if not checkpoint.is_file():
+        raise FileNotFoundError(
+            f"Checkpoint not found at {checkpoint}. "
+            f"Train first or upload to the `{OUTPUT_VOLUME}` volume."
         )
-        .pip_install(
-            "segment-anything @ git+https://github.com/facebookresearch/segment-anything.git",
+    if not Path(dataset_root).is_dir():
+        raise FileNotFoundError(
+            f"{spec['label']} dataset not found at {dataset_root}. "
+            f"Populate the `{spec['volume']}` volume via the download script."
         )
-        .add_local_dir(
-            str(SRC_ROOT),
-            remote_path="/root/src",
-            ignore=["**/__pycache__/**", "**/.DS_Store"],
+
+
+app = modal.App(APP_NAME)
+inference_image = build_c3g_modal_image()
+weights_volume = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
+replica_volume = modal.Volume.from_name(REPLICA_VOLUME, create_if_missing=True)
+scannet_volume = modal.Volume.from_name(SCANNET_VOLUME, create_if_missing=True)
+output_volume = modal.Volume.from_name(OUTPUT_VOLUME, create_if_missing=True)
+
+
+@app.function(
+    image=inference_image,
+    gpu="A100-80GB",
+    timeout=60 * 60 * 2,
+    volumes={
+        str(WEIGHTS_MOUNT): weights_volume,
+        str(REPLICA_MOUNT): replica_volume,
+        str(SCANNET_MOUNT): scannet_volume,
+        str(OUTPUT_MOUNT): output_volume,
+    },
+)
+def eval_c3g_sam(
+    run_name: str,
+    dataset: DatasetName = "replica",
+    resume: str = "",
+    dataset_root: str | None = None,
+    sam_checkpoint: str | None = None,
+    smoke: bool = False,
+) -> str:
+    """Run C3G-F + SAM test/eval via Hydra on a Modal dataset volume."""
+    if not resume:
+        raise ValueError("resume= is required (checkpoint path on the output volume).")
+
+    sam_path = resolve_sam_checkpoint(sam_checkpoint)
+    print(f"SAM checkpoint: {sam_path}")
+
+    data_root = resolve_dataset_root(dataset, dataset_root)
+    _validate_eval_paths(dataset=dataset, dataset_root=data_root, resume=resume)
+
+    smoke_scene = find_smoke_scene(data_root) if smoke else None
+    if smoke_scene is not None:
+        print(f"Smoke scene: {smoke_scene}")
+
+    overrides = build_prompted_test_overrides(
+        run_name=run_name,
+        dataset=dataset,
+        dataset_root=data_root,
+        checkpoint_path=resume,
+        sam_checkpoint=sam_path,
+        smoke_scene=smoke_scene,
+    )
+
+    cmd = ["uv", "run", "--no-sync", "python", "-m", "src.main", *overrides]
+    print("Running:", " ".join(shlex.quote(part) for part in cmd))
+    subprocess.run(cmd, check=True, cwd=str(C3G_MODAL_WORKSPACE))
+
+    run_dir = OUTPUT_MOUNT / "runs" / run_name
+    output_volume.commit()
+    label = "Smoke eval" if smoke else "Eval"
+    print(f"{label} complete. Artifacts under {run_dir} (volume `{OUTPUT_VOLUME}`).")
+    return str(run_dir)
+
+
+def _dispatch_eval(
+    *,
+    run_name: str,
+    dataset: DatasetName,
+    resume: str,
+    dataset_root: str | None,
+    sam_checkpoint: str | None,
+    smoke: bool,
+    detach: bool,
+) -> None:
+    from src.misc.modal_run import dispatch_remote
+
+    mode_label = "smoke eval" if smoke else "eval"
+    result = dispatch_remote(
+        eval_c3g_sam,
+        run_name=run_name,
+        dataset=dataset,
+        resume=resume,
+        dataset_root=dataset_root,
+        sam_checkpoint=sam_checkpoint,
+        smoke=smoke,
+        detach=detach,
+        job_name=f"C3G SAM {mode_label} ({run_name}, {dataset})",
+        app_name=APP_NAME,
+    )
+    if detach:
+        return
+    print(f"Remote run finished: {result}")
+
+
+@app.local_entrypoint()
+def smoke(
+    run_name: str = "sam_prompted_eval_smoke",
+    dataset: DatasetName = "replica",
+    resume: str = "",
+    dataset_root: str | None = None,
+    sam_checkpoint: str | None = None,
+    detach: bool | None = None,
+    wait: bool = False,
+) -> None:
+    """One-batch eval on the first scene (requires ``--resume``)."""
+    if dataset not in DATASET_SPECS:
+        print(
+            f"Unknown dataset {dataset!r}; choose one of: {', '.join(DATASET_SPECS)}",
+            file=sys.stderr,
         )
-        .env({"PYTHONPATH": "/root"})
+        raise SystemExit(2)
+    if not resume:
+        print("--resume is required (checkpoint on the c3g-train-outputs volume).", file=sys.stderr)
+        raise SystemExit(2)
+    _dispatch_eval(
+        run_name=run_name,
+        dataset=dataset,
+        resume=resume,
+        dataset_root=dataset_root,
+        sam_checkpoint=sam_checkpoint,
+        smoke=True,
+        detach=resolve_detach(detach=detach, remote_job=not wait),
     )
 
 
-@dataclass
-class DecodePayload:
-    features_b64: str
-    shape: list[int]
-    dtype: str = "float32"
-    point_coords: list[list[list[float]]] | None = None
-    point_labels: list[list[int]] | None = None
-    boxes: list[list[float]] | None = None
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> DecodePayload:
-        return cls(
-            features_b64=str(payload["features_b64"]),
-            shape=[int(x) for x in payload["shape"]],
-            dtype=str(payload.get("dtype", "float32")),
-            point_coords=payload.get("point_coords"),
-            point_labels=payload.get("point_labels"),
-            boxes=payload.get("boxes"),
+@app.local_entrypoint()
+def main(
+    run_name: str = "sam_prompted_eval",
+    dataset: DatasetName = "replica",
+    resume: str = "",
+    dataset_root: str | None = None,
+    sam_checkpoint: str | None = None,
+    detach: bool | None = None,
+    wait: bool = True,
+) -> None:
+    """Full test pass (``trainer.limit_test_batches=1`` in overrides)."""
+    if dataset not in DATASET_SPECS:
+        print(
+            f"Unknown dataset {dataset!r}; choose one of: {', '.join(DATASET_SPECS)}",
+            file=sys.stderr,
         )
-
-
-def _decode_features_b64(features_b64: str, shape: list[int], dtype: str):
-    import numpy as np
-
-    if len(shape) != 4:
-        raise ValueError(f"shape must be [B, C, H, W], got {shape}")
-    np_dtype = np.dtype(dtype)
-    raw = base64.b64decode(features_b64)
-    array = np.frombuffer(raw, dtype=np_dtype).reshape(shape)
-    if array.size == 0:
-        raise ValueError("features payload is empty")
-    return array
-
-
-def _encode_float_array(array) -> dict[str, Any]:
-    import numpy as np
-
-    packed = np.ascontiguousarray(array)
-    return {
-        "data_b64": base64.b64encode(packed.tobytes()).decode("ascii"),
-        "shape": list(packed.shape),
-        "dtype": str(packed.dtype),
-    }
-
-
-def _run_c3g_sam_decode(mask_decoder, device, payload: dict[str, Any]) -> dict[str, Any]:
-    import numpy as np
-    import torch
-
-    request = DecodePayload.from_dict(payload)
-    features_np = _decode_features_b64(
-        request.features_b64,
-        request.shape,
-        request.dtype,
+        raise SystemExit(2)
+    if not resume:
+        print("--resume is required (checkpoint on the c3g-train-outputs volume).", file=sys.stderr)
+        raise SystemExit(2)
+    _dispatch_eval(
+        run_name=run_name,
+        dataset=dataset,
+        resume=resume,
+        dataset_root=dataset_root,
+        sam_checkpoint=sam_checkpoint,
+        smoke=False,
+        detach=resolve_detach(detach=detach, remote_job=not wait),
     )
-    features = torch.from_numpy(features_np).to(device)
-
-    point_coords = point_labels = boxes = None
-    if request.point_coords is not None:
-        point_coords = torch.tensor(
-            request.point_coords, dtype=torch.float32, device=device
-        )
-    if request.point_labels is not None:
-        point_labels = torch.tensor(request.point_labels, dtype=torch.int, device=device)
-    if request.boxes is not None:
-        boxes = torch.tensor(request.boxes, dtype=torch.float32, device=device)
-
-    with torch.no_grad():
-        logits = mask_decoder(
-            features,
-            point_coords=point_coords,
-            point_labels=point_labels,
-            box=boxes,
-        )
-
-    logits_np = logits.detach().cpu().numpy()
-    probs = 1.0 / (1.0 + np.exp(-logits_np))
-    return {
-        "logits": _encode_float_array(logits_np),
-        "probabilities": _encode_float_array(probs.astype(np.float32)),
-    }
-
-
-def _smoke_test_payload() -> dict[str, Any]:
-    import numpy as np
-
-    rng = np.random.default_rng(0)
-    features = rng.standard_normal((1, 256, 64, 64), dtype=np.float32)
-    return {
-        "features_b64": base64.b64encode(features.tobytes()).decode("ascii"),
-        "shape": [1, 256, 64, 64],
-        "dtype": "float32",
-    }
-
-
-# ---------------------------------------------------------------------------
-# Modal entrypoint
-# ---------------------------------------------------------------------------
-
-try:
-    import modal
-
-    from src.inference.modal_sam_common import (
-        DEFAULT_SAM_CHECKPOINT,
-        WEIGHTS_MOUNT,
-        WEIGHTS_VOLUME,
-        resolve_detach,
-    )
-
-    app = modal.App(APP_NAME)
-    weights_volume = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
-    inference_image = _build_image()
-
-    @app.cls(
-        image=inference_image,
-        gpu="A10G",
-        volumes={str(WEIGHTS_MOUNT): weights_volume},
-        timeout=60 * 30,
-        scaledown_window=300,
-    )
-    class C3GSAMPipeline:
-        """C3G SAM mask decoder on precomputed rendered feature maps."""
-
-        @modal.enter()
-        def load_model(self) -> None:
-            import torch
-
-            from src.model.sam_decoder import SAMMaskDecoderWrapper
-
-            checkpoint_path = str(DEFAULT_SAM_CHECKPOINT)
-            if not Path(checkpoint_path).is_file():
-                raise FileNotFoundError(
-                    f"SAM checkpoint not found at {checkpoint_path}. "
-                    f"Upload with: modal volume put {WEIGHTS_VOLUME} sam_vit_h.pth <local.pth>"
-                )
-
-            self.device = torch.device("cuda")
-            self.mask_decoder = SAMMaskDecoderWrapper(
-                sam_checkpoint=checkpoint_path,
-                model_variant=DEFAULT_VARIANT,
-                use_lora=False,
-                lora_rank=4,
-            ).to(self.device)
-            self.mask_decoder.eval()
-
-        @modal.method()
-        def decode(self, payload: dict[str, Any]) -> dict[str, Any]:
-            return _run_c3g_sam_decode(self.mask_decoder, self.device, payload)
-
-        @modal.method()
-        def smoke_decode(self) -> dict[str, Any]:
-            """Decode one random feature map on Modal GPU (no local inputs)."""
-            return _run_c3g_sam_decode(
-                self.mask_decoder, self.device, _smoke_test_payload()
-            )
-
-        @modal.fastapi_endpoint(method="POST", docs=True)
-        def web(self):
-            from fastapi import FastAPI
-            from pydantic import BaseModel, Field
-
-            class DecodeBody(BaseModel):
-                features_b64: str = Field(
-                    ..., description="float32 tensor bytes (base64), shape [B,C,H,W]."
-                )
-                shape: list[int]
-                dtype: str = "float32"
-                point_coords: list[list[list[float]]] | None = None
-                point_labels: list[list[int]] | None = None
-                boxes: list[list[float]] | None = None
-
-            service = self
-            api = FastAPI(
-                title="C3G SAM Pipeline",
-                description="SAMMaskDecoderWrapper on rendered Gaussian features",
-            )
-
-            @api.post("/decode")
-            def decode_endpoint(body: DecodeBody) -> dict[str, Any]:
-                return service.decode.local(body.model_dump())
-
-            return api
-
-    def _dispatch_smoke(*, detach: bool | None, wait: bool) -> None:
-        from src.misc.modal_run import dispatch_remote
-
-        use_detach = resolve_detach(detach=detach, remote_job=not wait)
-        result = dispatch_remote(
-            C3GSAMPipeline().smoke_decode,
-            detach=use_detach,
-            job_name="C3G SAM decode smoke",
-            app_name=APP_NAME,
-        )
-        if use_detach:
-            return
-        print("OK — logits shape", result["logits"]["shape"])
-
-    @app.local_entrypoint()
-    def modal_main(
-        smoke_test: bool = False,
-        detach: bool | None = None,
-        wait: bool = False,
-    ) -> None:
-        if not smoke_test:
-            print("Pass --smoke-test or use entrypoint ::smoke for a detached Modal GPU run.")
-            return
-        _dispatch_smoke(detach=detach, wait=wait)
-
-    @app.local_entrypoint()
-    def smoke(detach: bool | None = None, wait: bool = False) -> None:
-        """Detached SAM decoder smoke test on Modal GPU."""
-        _dispatch_smoke(detach=detach, wait=wait)
-
-except ImportError:
-    app = None  # type: ignore[assignment]
-    modal_main = None  # type: ignore[assignment,misc]
-    smoke = None  # type: ignore[assignment,misc]
