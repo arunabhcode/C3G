@@ -100,8 +100,10 @@ class LossSegmentationPrompted(
         target_image: Float[Tensor, "batch view 3 height width"] | None = None,
     ) -> Float[Tensor, ""]:
         label_maps = batch["target"]["label"]
-        B, V, C, H, W = prediction.feature.shape
-        device = prediction.feature.device
+        target_view_count = label_maps.shape[1]
+        rendered_features = prediction.feature[:, :target_view_count]
+        B, V, C, H, W = rendered_features.shape
+        device = rendered_features.device
 
         total_loss = torch.tensor(0.0, device=device)
         valid_count = 0
@@ -134,7 +136,7 @@ class LossSegmentationPrompted(
                 point_coords = point_coords.unsqueeze(0).to(device)
                 point_labels = point_labels.unsqueeze(0).to(device)
 
-                features = prediction.feature[b, v].unsqueeze(0)
+                features = rendered_features[b, v].unsqueeze(0)
                 features_64 = F.interpolate(
                     features, size=(64, 64), mode="bilinear", align_corners=False
                 )

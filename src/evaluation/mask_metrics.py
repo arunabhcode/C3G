@@ -112,10 +112,11 @@ def warp_mask_to_pose(
         return x.float()
 
     mask_t = _to_tensor(mask)
-    src_ext = _to_tensor(src_extrinsics)
-    dst_ext = _to_tensor(dst_extrinsics)
-    src_K = _to_tensor(src_intrinsics)
-    dst_K = _to_tensor(dst_intrinsics)
+    device = mask_t.device
+    src_ext = _to_tensor(src_extrinsics).to(device)
+    dst_ext = _to_tensor(dst_extrinsics).to(device)
+    src_K = _to_tensor(src_intrinsics).to(device)
+    dst_K = _to_tensor(dst_intrinsics).to(device)
 
     H, W = image_size
     if mask_t.shape != (H, W):
@@ -124,9 +125,9 @@ def warp_mask_to_pose(
         ).squeeze()
 
     if depth is None:
-        depth_t = torch.ones(H, W)
+        depth_t = torch.ones(H, W, device=device)
     else:
-        depth_t = _to_tensor(depth)
+        depth_t = _to_tensor(depth).to(device)
         if depth_t.shape != (H, W):
             depth_t = torch.nn.functional.interpolate(
                 depth_t.unsqueeze(0).unsqueeze(0),
@@ -135,7 +136,11 @@ def warp_mask_to_pose(
                 align_corners=False,
             ).squeeze()
 
-    v_coords, u_coords = torch.meshgrid(torch.arange(H), torch.arange(W), indexing="ij")
+    v_coords, u_coords = torch.meshgrid(
+        torch.arange(H, device=device),
+        torch.arange(W, device=device),
+        indexing="ij",
+    )
     u_coords = u_coords.float()
     v_coords = v_coords.float()
 
@@ -173,10 +178,10 @@ def warp_mask_to_pose(
     mask_flat = mask_t.reshape(-1).bool()
     fg_and_valid = mask_flat & in_bounds
 
-    warped = torch.zeros(H, W, dtype=torch.uint8)
+    warped = torch.zeros(H, W, dtype=torch.uint8, device=device)
     warped[v_dst[fg_and_valid], u_dst[fg_and_valid]] = 255
 
-    return warped.numpy()
+    return warped.detach().cpu().numpy()
 
 
 def warp_mask_iou(

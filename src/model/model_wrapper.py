@@ -421,7 +421,7 @@ class ModelWrapper(LightningModule):
         mask_b = (logits_b[:, 0].sigmoid() > 0.5).to(torch.uint8) * 255
 
         depth_a = output_a.depth[:, 0] if output_a.depth is not None else None
-        h, w = image_size
+        h, w = mask_a.shape[-2:]
 
         iou_a_to_b = self.compute_warp_mask_miou(
             mask_a[0],

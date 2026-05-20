@@ -3,12 +3,12 @@ defaults:
   - view_sampler: bounded
 
 name: replica_semseg
-roots: [/home/arunabh/replica_semseg]
-scenes: [office0, office1, office2, office3, office4, room0, room1, room2]
+roots: [/workspace/data/replica_semseg]
+scenes: [office0]
 make_baseline_1: true
 augment: true
 
-input_image_shape: [256, 256]
+input_image_shape: [252, 252]
 original_image_shape: [680, 1200]
 cameras_are_circular: false
 
