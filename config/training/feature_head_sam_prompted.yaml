@@ -8,7 +8,7 @@ defaults:
 
 wandb:
   name: replica_sam_prompted
-  tags: [replica, 256x256, sam, prompted]
+  tags: [replica, 252x252, sam, prompted]
 
 model:
   encoder:

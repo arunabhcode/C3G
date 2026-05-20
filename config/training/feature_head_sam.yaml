@@ -8,7 +8,7 @@ defaults:
 
 wandb:
   name: replica_sam
-  tags: [replica, 256x256, sam]
+  tags: [replica, 252x252, sam]
 
 model:
   encoder:

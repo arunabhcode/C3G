@@ -43,9 +43,62 @@ DEFAULT_SAM_CHECKPOINT = WEIGHTS_MOUNT / "sam_vit_h.pth"
 DEFAULT_VGGT_WEIGHTS = WEIGHTS_MOUNT / "model.pt"
 DEFAULT_GAUSSIAN_WEIGHTS = WEIGHTS_MOUNT / "gaussian_decoder.ckpt"
 
+
+def resolve_encoder_pretrained_weights(override: str | Path | None = None) -> Path:
+    """Return encoder init weights from the ``c3g-weights`` volume.
+
+    Prefers ``gaussian_decoder.ckpt``; falls back to ``model.pt`` when the
+    Gaussian decoder checkpoint is not on the volume.
+    """
+    if override is not None:
+        path = Path(override)
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Encoder weights not found at {path}. "
+                f"Upload to the `{WEIGHTS_VOLUME}` volume."
+            )
+        return path
+
+    if DEFAULT_GAUSSIAN_WEIGHTS.is_file():
+        return DEFAULT_GAUSSIAN_WEIGHTS
+    if DEFAULT_VGGT_WEIGHTS.is_file():
+        return DEFAULT_VGGT_WEIGHTS
+
+    raise FileNotFoundError(
+        f"Missing encoder weights on `{WEIGHTS_VOLUME}` volume. "
+        f"Upload one of:\n"
+        f"  modal volume put {WEIGHTS_VOLUME} /path/to/gaussian_decoder.ckpt gaussian_decoder.ckpt\n"
+        f"  modal volume put {WEIGHTS_VOLUME} /path/to/model.pt model.pt"
+    )
+
+
+def resolve_sam_checkpoint(override: str | Path | None = None) -> Path:
+    """Return the SAM ViT-H checkpoint from the ``c3g-weights`` volume."""
+    path = Path(override) if override is not None else DEFAULT_SAM_CHECKPOINT
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"SAM checkpoint not found at {path}. "
+            f"Upload with:\n"
+            f"  modal volume put {WEIGHTS_VOLUME} /path/to/sam_vit_h.pth sam_vit_h.pth"
+        )
+    return path
+
+
+def resolve_training_weights(
+    *,
+    gaussian_weights: str | Path | None = None,
+    sam_checkpoint: str | Path | None = None,
+) -> tuple[Path, Path]:
+    """Resolve SAM and encoder init paths on the ``c3g-weights`` volume."""
+    return (
+        resolve_encoder_pretrained_weights(gaussian_weights),
+        resolve_sam_checkpoint(sam_checkpoint),
+    )
+
 DATASET_SPECS: dict[DatasetName, dict[str, str | list[str]]] = {
     "replica": {
-        "hydra_add": "replica_2dseg=replica_2dseg",
+        "hydra_add": "replica_2dseg",
+        "hydra_override_group": "dataset@dataset.replica_semseg",
         "roots_key": "dataset.replica_2dseg.roots",
         "overfit_key": "dataset.replica_2dseg.overfit_to_scene",
         # Prepared flat-frame Replica dataset lives on the Modal volume mounted here.
@@ -55,7 +108,8 @@ DATASET_SPECS: dict[DatasetName, dict[str, str | list[str]]] = {
         "scenes": REPLICA_2DSEG_SCENES,
     },
     "scannet": {
-        "hydra_add": "scannet_2dseg=scannet_2dseg",
+        "hydra_add": "scannet_2dseg",
+        "hydra_override_group": "dataset@dataset.scannet_semseg",
         "roots_key": "dataset.scannet_2dseg.roots",
         "overfit_key": "dataset.scannet_2dseg.overfit_to_scene",
         "default_root": str(SCANNET_MOUNT),
@@ -139,8 +193,8 @@ def build_sam_train_overrides(
     dataset_root: str,
     max_steps: int,
     wandb_mode: str,
-    gaussian_weights: str,
-    sam_checkpoint: str,
+    gaussian_weights: str | Path | None = None,
+    sam_checkpoint: str | Path | None = None,
     val_interval: int,
     batch_size: int,
     training_config: TrainingConfigName = TRAINING_CONFIG_PROMPTED,
@@ -151,24 +205,23 @@ def build_sam_train_overrides(
     output_mount: Path = OUTPUT_MOUNT,
     smoke_scene: str | None = None,
 ) -> list[str]:
+    encoder_weights, sam_path = resolve_training_weights(
+        gaussian_weights=gaussian_weights,
+        sam_checkpoint=sam_checkpoint,
+    )
     spec = DATASET_SPECS[dataset]
     run_dir = output_mount / "runs" / run_name
     overrides = [
         f"+training={training_config}",
-        # Drop the default Replica loaders before adding the flat 2D segmentation loader.
-        "~dataset@_group_.replica",
-        "~dataset@_group_.replica_semseg",
-        "~dataset@_group_.scannet",
-        "~dataset@_group_.scannet_semseg",
-        f"+dataset@_group_.{spec['hydra_add']}",
+        f"{spec['hydra_override_group']}={spec['hydra_add']}",
         f"wandb.mode={wandb_mode}",
         f"wandb.name={run_name}",
         f"hydra.run.dir={run_dir}",
         f"trainer.max_steps={max_steps}",
         f"trainer.val_check_interval={val_interval}",
         f"data_loader.train.batch_size={batch_size}",
-        f"model.encoder.pretrained_weights={gaussian_weights}",
-        f"train.sam_checkpoint={sam_checkpoint}",
+        f"model.encoder.pretrained_weights={encoder_weights}",
+        f"train.sam_checkpoint={sam_path}",
         f"{spec['roots_key']}=[{dataset_root}]",
     ]
     if training_config == TRAINING_CONFIG_PROMPTED:
@@ -194,8 +247,8 @@ def build_prompted_train_overrides(
     dataset_root: str,
     max_steps: int,
     wandb_mode: str,
-    gaussian_weights: str,
-    sam_checkpoint: str,
+    gaussian_weights: str | Path | None = None,
+    sam_checkpoint: str | Path | None = None,
     val_interval: int,
     batch_size: int,
     prompt_strategy: str,
@@ -242,12 +295,7 @@ def build_prompted_test_overrides(
     run_dir = output_mount / "runs" / run_name
     overrides = [
         f"+training={training_config}",
-        # Drop the default 3D/semseg loaders before adding the flat 2D segmentation loader.
-        "~dataset@_group_.replica",
-        "~dataset@_group_.replica_semseg",
-        "~dataset@_group_.scannet",
-        "~dataset@_group_.scannet_semseg",
-        f"+dataset@_group_.{spec['hydra_add']}",
+        f"{spec['hydra_override_group']}={spec['hydra_add']}",
         "mode=test",
         f"wandb.mode={wandb_mode}",
         f"wandb.name={run_name}",

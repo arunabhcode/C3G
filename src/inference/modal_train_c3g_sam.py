@@ -1,14 +1,22 @@
-
 #!/usr/bin/env python3
-"""Small Modal runner for prompted SAM training on the Replica Modal volume.
+"""Modal runner for prompted SAM training on the Replica volume.
 
-This mirrors the prompted-training flow while keeping all dataset access on Modal:
+All training weights are read from the ``c3g-weights`` volume (mounted at
+``/weights``): ``sam_vit_h.pth``, ``gaussian_decoder.ckpt`` (preferred encoder
+init), or ``model.pt`` (VGGT fallback).
 
-    modal run src/inference/simp.py::smoke
+Upload weights::
 
-For a real run:
+    modal volume put c3g-weights /path/to/sam_vit_h.pth sam_vit_h.pth
+    modal volume put c3g-weights /path/to/gaussian_decoder.ckpt gaussian_decoder.ckpt
 
-    modal run src/inference/simp.py::main --run-name sam_prompted_replica --max-steps 5001
+Smoke test::
+
+    modal run src/inference/modal_train_c3g_sam.py::smoke
+
+Full training::
+
+    modal run src/inference/modal_train_c3g_sam.py --run-name sam_prompted_replica
 """
 
 from __future__ import annotations
@@ -20,8 +28,6 @@ from pathlib import Path
 import modal
 
 from src.inference.modal_sam_common import (
-    DEFAULT_GAUSSIAN_WEIGHTS,
-    DEFAULT_SAM_CHECKPOINT,
     OUTPUT_MOUNT,
     OUTPUT_VOLUME,
     REPLICA_MOUNT,
@@ -29,8 +35,8 @@ from src.inference.modal_sam_common import (
     SAM_NUM_CHANNELS,
     WEIGHTS_MOUNT,
     WEIGHTS_VOLUME,
-    build_prompted_train_overrides,
     find_smoke_scene,
+    resolve_training_weights,
 )
 
 APP_NAME = "c3g-sam-prompted-simple"
@@ -101,6 +107,44 @@ def _image() -> modal.Image:
     )
 
 
+def _build_replica_prompted_overrides(
+    *,
+    run_name: str,
+    max_steps: int,
+    encoder_weights: Path,
+    sam_checkpoint: Path,
+    smoke_scene: str | None = None,
+    smoke: bool = False,
+) -> list[str]:
+    run_dir = OUTPUT_MOUNT / "runs" / run_name
+    overrides = [
+        "+training=feature_head_sam_prompted",
+        "dataset@dataset.replica_semseg=replica_2dseg",
+        "wandb.mode=disabled",
+        f"wandb.name={run_name}",
+        f"hydra.run.dir={run_dir}",
+        f"trainer.max_steps={max_steps}",
+        f"trainer.val_check_interval={10_000 if smoke else 1000}",
+        f"data_loader.train.batch_size={1 if smoke else 2}",
+        f"model.encoder.pretrained_weights={encoder_weights}",
+        f"train.sam_checkpoint={sam_checkpoint}",
+        f"dataset.replica_semseg.roots=[{REPLICA_MOUNT}]",
+        "train.prompt_strategy=centroid",
+        "train.prompted_seg_loss_weight=1.0",
+        "train.min_object_pixels=16",
+    ]
+    if smoke_scene is not None:
+        overrides.append(f"dataset.replica_semseg.overfit_to_scene={smoke_scene}")
+    if smoke:
+        overrides.extend(
+            [
+                "data_loader.train.num_workers=0",
+                "checkpointing.every_n_train_steps=1000000",
+            ]
+        )
+    return overrides
+
+
 app = modal.App(APP_NAME)
 weights_volume = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
 replica_volume = modal.Volume.from_name(REPLICA_VOLUME, create_if_missing=True)
@@ -109,7 +153,7 @@ output_volume = modal.Volume.from_name(OUTPUT_VOLUME, create_if_missing=True)
 
 @app.function(
     image=_image(),
-    gpu="A10G",
+    gpu="A100-80GB",
     timeout=60 * 60 * 4,
     volumes={
         str(WEIGHTS_MOUNT): weights_volume,
@@ -123,10 +167,9 @@ def train_prompted_replica(
     smoke: bool = False,
 ) -> str:
     """Run prompted SAM training against the prepared Replica Modal volume."""
-    if not DEFAULT_SAM_CHECKPOINT.is_file():
-        raise FileNotFoundError(f"Missing SAM checkpoint: {DEFAULT_SAM_CHECKPOINT}")
-    if not DEFAULT_GAUSSIAN_WEIGHTS.is_file():
-        raise FileNotFoundError(f"Missing Gaussian weights: {DEFAULT_GAUSSIAN_WEIGHTS}")
+    encoder_weights, sam_checkpoint = resolve_training_weights()
+    print(f"Encoder init: {encoder_weights}")
+    print(f"SAM checkpoint: {sam_checkpoint}")
     if not REPLICA_MOUNT.is_dir():
         raise FileNotFoundError(f"Missing Replica volume mount: {REPLICA_MOUNT}")
 
@@ -134,29 +177,14 @@ def train_prompted_replica(
     if smoke_scene is not None:
         print(f"Smoke scene: {smoke_scene}")
 
-    overrides = build_prompted_train_overrides(
+    overrides = _build_replica_prompted_overrides(
         run_name=run_name,
-        dataset="replica",
-        dataset_root=str(REPLICA_MOUNT),
         max_steps=1 if smoke else max_steps,
-        wandb_mode="disabled",
-        gaussian_weights=str(DEFAULT_GAUSSIAN_WEIGHTS),
-        sam_checkpoint=str(DEFAULT_SAM_CHECKPOINT),
-        val_interval=10_000 if smoke else 1000,
-        batch_size=1 if smoke else 2,
-        prompt_strategy="centroid",
-        prompted_seg_loss_weight=1.0,
-        min_object_pixels=16,
-        resume=None,
+        encoder_weights=encoder_weights,
+        sam_checkpoint=sam_checkpoint,
         smoke_scene=smoke_scene,
+        smoke=smoke,
     )
-    if smoke:
-        overrides.extend(
-            [
-                "data_loader.train.num_workers=0",
-                "checkpointing.every_n_train_steps=1000000",
-            ]
-        )
 
     cmd = ["uv", "run", "--no-sync", "python", "-m", "src.main", *overrides]
     print("Running:", " ".join(shlex.quote(part) for part in cmd))
