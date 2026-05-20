@@ -48,28 +48,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-from src.inference.modal_sam_common import (
-    DATASET_SPECS,
-    DEFAULT_GAUSSIAN_WEIGHTS,
-    DEFAULT_SAM_CHECKPOINT,
-    DEFAULT_VGGT_WEIGHTS,
-    OUTPUT_MOUNT,
-    OUTPUT_VOLUME,
-    REPLICA_MOUNT,
-    REPLICA_VOLUME,
-    SCANNET_MOUNT,
-    SCANNET_VOLUME,
-    SAM_NUM_CHANNELS,
-    WEIGHTS_MOUNT,
-    WEIGHTS_VOLUME,
-    DatasetName,
-    build_prompted_test_overrides,
-    build_prompted_train_overrides,
-    find_smoke_scene,
-    resolve_dataset_root,
-    resolve_detach,
-)
-
 APP_NAME = "c3g-train-sam-feature"
 WORKSPACE = Path("/workspace")
 
@@ -81,6 +59,8 @@ CONFIG_H = (
 def _build_training_image():
     import modal
 
+    from src.inference.modal_sam_common import SAM_NUM_CHANNELS
+
     return (
         modal.Image.from_registry(
             "nvidia/cuda:12.4.1-devel-ubuntu22.04",
@@ -91,6 +71,7 @@ def _build_training_image():
             "curl",
             "ca-certificates",
             "build-essential",
+            "clang",
             "libgl1",
             "libglib2.0-0",
         )
@@ -102,6 +83,7 @@ def _build_training_image():
         .add_local_dir(
             str(REPO_ROOT),
             remote_path=str(WORKSPACE),
+            copy=True,
             ignore=[
                 "**/.git/**",
                 "**/__pycache__/**",
@@ -116,18 +98,23 @@ def _build_training_image():
         .run_commands(
             f"sed -i 's/#define NUM_SEMANTIC_CHANNELS 512/#define NUM_SEMANTIC_CHANNELS {SAM_NUM_CHANNELS}/' {CONFIG_H}",
             "uv sync --frozen",
-            "python -c \"from submodules.diff_gaussian_rasterization_w_feature_detach.diff_gaussian_rasterization import GaussianRasterizationSettings\"",
-            "python -c \"from submodules.diff_gaussian_rasterization_w_pose.diff_gaussian_rasterization import GaussianRasterizationSettings\"",
+            "uv run python -c \"from submodules.diff_gaussian_rasterization_w_feature_detach.diff_gaussian_rasterization import GaussianRasterizationSettings\"",
+            "uv run python -c \"from submodules.diff_gaussian_rasterization_w_pose.diff_gaussian_rasterization import GaussianRasterizationSettings\"",
         )
         .env({"PYTHONPATH": str(WORKSPACE)})
     )
 
 
 def _build_main_command(overrides: list[str]) -> list[str]:
-    return ["python", "-m", "src.main", *overrides]
+    return ["uv", "run", "python", "-m", "src.main", *overrides]
 
 
 def _resolve_weights(gaussian_weights: str | None) -> str:
+    from src.inference.modal_sam_common import (
+        DEFAULT_GAUSSIAN_WEIGHTS,
+        DEFAULT_VGGT_WEIGHTS,
+    )
+
     gaussian_path = gaussian_weights or str(DEFAULT_GAUSSIAN_WEIGHTS)
     if not Path(gaussian_path).is_file():
         gaussian_path = str(DEFAULT_VGGT_WEIGHTS)
@@ -141,6 +128,8 @@ def _validate_paths(
     sam_path: str,
     data_root: str,
 ) -> None:
+    from src.inference.modal_sam_common import WEIGHTS_VOLUME
+
     for required, label in (
         (gaussian_path, "Gaussian init / VGGT weights"),
         (sam_path, "SAM checkpoint"),
@@ -178,6 +167,17 @@ def _execute_c3g_sam_job(
     test: bool,
 ) -> str:
     """Run training, smoke train, or eval entirely on the Modal container."""
+    from src.inference.modal_sam_common import (
+        DATASET_SPECS,
+        DEFAULT_SAM_CHECKPOINT,
+        OUTPUT_MOUNT,
+        OUTPUT_VOLUME,
+        build_prompted_test_overrides,
+        build_prompted_train_overrides,
+        find_smoke_scene,
+        resolve_dataset_root,
+    )
+
     if smoke_test and test:
         raise ValueError("Pass only one of smoke_test=True or test=True.")
 
@@ -258,6 +258,20 @@ def _execute_c3g_sam_job(
 
 try:
     import modal
+
+    from src.inference.modal_sam_common import (
+        DATASET_SPECS,
+        OUTPUT_MOUNT,
+        OUTPUT_VOLUME,
+        REPLICA_MOUNT,
+        REPLICA_VOLUME,
+        SCANNET_MOUNT,
+        SCANNET_VOLUME,
+        WEIGHTS_MOUNT,
+        WEIGHTS_VOLUME,
+        DatasetName,
+        resolve_detach,
+    )
 
     app = modal.App(APP_NAME)
     training_image = _build_training_image()

@@ -28,17 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
-
-from src.inference.modal_sam_common import (
-    DEFAULT_SAM_CHECKPOINT,
-    WEIGHTS_MOUNT,
-    WEIGHTS_VOLUME,
-    resolve_detach,
-)
 
 APP_NAME = "c3g-sam-pipeline"
 DEFAULT_VARIANT = "sam_vit_h"
@@ -90,7 +81,9 @@ class DecodePayload:
         )
 
 
-def _decode_features_b64(features_b64: str, shape: list[int], dtype: str) -> np.ndarray:
+def _decode_features_b64(features_b64: str, shape: list[int], dtype: str):
+    import numpy as np
+
     if len(shape) != 4:
         raise ValueError(f"shape must be [B, C, H, W], got {shape}")
     np_dtype = np.dtype(dtype)
@@ -101,7 +94,9 @@ def _decode_features_b64(features_b64: str, shape: list[int], dtype: str) -> np.
     return array
 
 
-def _encode_float_array(array: np.ndarray) -> dict[str, Any]:
+def _encode_float_array(array) -> dict[str, Any]:
+    import numpy as np
+
     packed = np.ascontiguousarray(array)
     return {
         "data_b64": base64.b64encode(packed.tobytes()).decode("ascii"),
@@ -111,6 +106,7 @@ def _encode_float_array(array: np.ndarray) -> dict[str, Any]:
 
 
 def _run_c3g_sam_decode(mask_decoder, device, payload: dict[str, Any]) -> dict[str, Any]:
+    import numpy as np
     import torch
 
     request = DecodePayload.from_dict(payload)
@@ -148,6 +144,8 @@ def _run_c3g_sam_decode(mask_decoder, device, payload: dict[str, Any]) -> dict[s
 
 
 def _smoke_test_payload() -> dict[str, Any]:
+    import numpy as np
+
     rng = np.random.default_rng(0)
     features = rng.standard_normal((1, 256, 64, 64), dtype=np.float32)
     return {
@@ -163,6 +161,13 @@ def _smoke_test_payload() -> dict[str, Any]:
 
 try:
     import modal
+
+    from src.inference.modal_sam_common import (
+        DEFAULT_SAM_CHECKPOINT,
+        WEIGHTS_MOUNT,
+        WEIGHTS_VOLUME,
+        resolve_detach,
+    )
 
     app = modal.App(APP_NAME)
     weights_volume = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)

@@ -4,11 +4,24 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from src.dataset.dataset_replica_2dseg import SCENES as REPLICA_2DSEG_SCENES
-from src.dataset.dataset_scannet_2dseg import SCENES as SCANNET_2DSEG_SCENES
-from src.misc.frame_layout import FramePaths, list_frame_ids
+if TYPE_CHECKING:
+    from src.misc.frame_layout import FramePaths
+
+# Keep in sync with dataset_replica_2dseg / dataset_scannet_2dseg (avoid importing
+# src.dataset here — that package pulls in torch at import time).
+REPLICA_2DSEG_SCENES = [
+    "office0",
+    "office1",
+    "office2",
+    "office3",
+    "office4",
+    "room0",
+    "room1",
+    "room2",
+]
+SCANNET_2DSEG_SCENES = [f"scene{i:04d}_00" for i in range(697, 712)]
 
 DatasetName = Literal["replica", "scannet"]
 TrainingConfigName = Literal["feature_head_sam_prompted", "feature_head_sam"]
@@ -69,6 +82,8 @@ def find_smoke_scene(
     scenes: list[str] | None = None,
 ) -> str:
     """Return the first scene that has prepared frames on disk."""
+    from src.misc.frame_layout import list_frame_ids
+
     root = Path(dataset_root)
     index_path = root / "selected_seqs_test.json"
     if index_path.is_file():
@@ -100,6 +115,8 @@ def find_smoke_frame(
     scenes: list[str] | None = None,
 ) -> tuple[str, FramePaths]:
     """Return the first scene and frame triplet available on disk."""
+    from src.misc.frame_layout import FramePaths, list_frame_ids
+
     root = Path(dataset_root)
     scene_id = find_smoke_scene(root, scenes=scenes)
     scene_dir = root / scene_id

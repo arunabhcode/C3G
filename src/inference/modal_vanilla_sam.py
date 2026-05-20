@@ -26,26 +26,13 @@ import io
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import numpy as np
+if TYPE_CHECKING:
+    from src.inference.modal_sam_common import DatasetName
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
-
-from src.inference.modal_sam_common import (
-    DATASET_SPECS,
-    DEFAULT_SAM_CHECKPOINT,
-    REPLICA_MOUNT,
-    REPLICA_VOLUME,
-    SCANNET_MOUNT,
-    SCANNET_VOLUME,
-    WEIGHTS_MOUNT,
-    WEIGHTS_VOLUME,
-    DatasetName,
-    resolve_dataset_root,
-    resolve_detach,
-)
 
 APP_NAME = "c3g-vanilla-sam"
 DEFAULT_VARIANT = "sam_vit_h"
@@ -101,6 +88,7 @@ class PredictPayload:
 
 
 def _decode_image_bytes(data: bytes):
+    import numpy as np
     from PIL import Image
 
     image = Image.open(io.BytesIO(data)).convert("RGB")
@@ -110,7 +98,9 @@ def _decode_image_bytes(data: bytes):
     return torch.from_numpy(array).permute(2, 0, 1).unsqueeze(0)
 
 
-def _encode_mask_array(masks: np.ndarray) -> dict[str, Any]:
+def _encode_mask_array(masks) -> dict[str, Any]:
+    import numpy as np
+
     packed = masks.astype(np.uint8, copy=False)
     return {
         "masks_b64": base64.b64encode(packed.tobytes()).decode("ascii"),
@@ -124,6 +114,7 @@ def _run_vanilla_sam_predict(
     device,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
+    import numpy as np
     import torch
 
     from src.model.sam import forward as sam_forward
@@ -172,8 +163,14 @@ def _run_vanilla_sam_predict(
     return response
 
 
-def _load_smoke_image_bytes(dataset: DatasetName, dataset_root: str | None) -> tuple[bytes, str]:
-    spec = DATASET_SPECS[dataset]
+def _load_smoke_image_bytes(dataset: str, dataset_root: str | None) -> tuple[bytes, str]:
+    from src.inference.modal_sam_common import (
+        DATASET_SPECS,
+        find_smoke_frame,
+        resolve_dataset_root,
+    )
+
+    spec = DATASET_SPECS[dataset]  # type: ignore[index]
     root = resolve_dataset_root(dataset, dataset_root)
     scene_id, paths = find_smoke_frame(root, scenes=list(spec["scenes"]))  # type: ignore[arg-type]
     summary = f"{dataset} scene={scene_id} frame={paths.frame_id} ({paths.image.name})"
@@ -186,6 +183,19 @@ def _load_smoke_image_bytes(dataset: DatasetName, dataset_root: str | None) -> t
 
 try:
     import modal
+
+    from src.inference.modal_sam_common import (
+        DATASET_SPECS,
+        DEFAULT_SAM_CHECKPOINT,
+        REPLICA_MOUNT,
+        REPLICA_VOLUME,
+        SCANNET_MOUNT,
+        SCANNET_VOLUME,
+        WEIGHTS_MOUNT,
+        WEIGHTS_VOLUME,
+        DatasetName,
+        resolve_detach,
+    )
 
     app = modal.App(APP_NAME)
     weights_volume = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
