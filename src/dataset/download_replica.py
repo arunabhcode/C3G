@@ -7,6 +7,7 @@ output root (same layout as :mod:`download_scannet`)::
     <out>/<scene>/{frame_id}_x.jpg
     <out>/<scene>/{frame_id}_cam.npz
     <out>/<scene>/{frame_id}_y.png
+    <out>/<scene>/{frame_id}_depth.png
 
 Also writes ``selected_seqs_test.json``.
 
@@ -104,6 +105,13 @@ def copy_label(source_labels: Path, dest: Path, frame_idx: int) -> None:
     shutil.copy2(src, dest)
 
 
+def copy_depth(source_results: Path, dest: Path, frame_idx: int) -> None:
+    src = source_results / f"depth{frame_idx:06d}.png"
+    if not src.is_file():
+        raise FileNotFoundError(f"Missing depth frame {src}")
+    shutil.copy2(src, dest)
+
+
 def build_scene(
     scene: str,
     source: Path,
@@ -133,6 +141,7 @@ def build_scene(
         frame_names.append(frame_name)
         copy_rgb(results_dir, scene_out / f"{frame_name}_x.jpg", frame_idx)
         copy_label(labels_dir, scene_out / f"{frame_name}_y.png", frame_idx)
+        copy_depth(results_dir, scene_out / f"{frame_name}_depth.png", frame_idx)
         np.savez(
             scene_out / f"{frame_name}_cam.npz",
             camera_pose=poses[frame_idx].astype(np.float32),

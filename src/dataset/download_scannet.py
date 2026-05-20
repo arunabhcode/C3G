@@ -6,6 +6,7 @@ Writes one directory per scene under the output root::
     <out>/<scene_id>/{frame_id}_x.jpg
     <out>/<scene_id>/{frame_id}_cam.npz
     <out>/<scene_id>/{frame_id}_y.png
+    <out>/<scene_id>/{frame_id}_depth.png
 
 Also writes ``scannetv2-labels.combined.tsv`` and ``selected_seqs_test.json``.
 
@@ -87,7 +88,12 @@ class RGBDFrame:
         self.color_size_bytes = struct.unpack("Q", file_handle.read(8))[0]
         self.depth_size_bytes = struct.unpack("Q", file_handle.read(8))[0]
         self.color_data = file_handle.read(self.color_size_bytes)
-        file_handle.read(self.depth_size_bytes)
+        self.depth_data = file_handle.read(self.depth_size_bytes)
+
+    def decompress_depth(self, compression_type: str) -> bytes:
+        if compression_type == "zlib_ushort":
+            return zlib.decompress(self.depth_data)
+        raise ValueError(f"Unsupported depth compression: {compression_type}")
 
     def decompress_color(self, compression_type: str) -> np.ndarray:
         if compression_type == "jpeg":
@@ -110,17 +116,18 @@ class SensorData:
             self.intrinsic_color = np.asarray(
                 struct.unpack("f" * 16, file_handle.read(16 * 4)), dtype=np.float32
             ).reshape(4, 4)
-            file_handle.read(16 * 4)
-            file_handle.read(16 * 4)
-            file_handle.read(16 * 4)
+            file_handle.read(16 * 4)  # extrinsic_color
+            file_handle.read(16 * 4)  # intrinsic_depth
+            file_handle.read(16 * 4)  # extrinsic_depth
             color_compression = struct.unpack("i", file_handle.read(4))[0]
-            file_handle.read(4)
+            depth_compression = struct.unpack("i", file_handle.read(4))[0]
             self.color_compression_type = COMPRESSION_TYPE_COLOR[color_compression]
+            self.depth_compression_type = COMPRESSION_TYPE_DEPTH[depth_compression]
             self.color_width = struct.unpack("I", file_handle.read(4))[0]
             self.color_height = struct.unpack("I", file_handle.read(4))[0]
-            file_handle.read(4)
-            file_handle.read(4)
-            file_handle.read(4)
+            self.depth_width = struct.unpack("I", file_handle.read(4))[0]
+            self.depth_height = struct.unpack("I", file_handle.read(4))[0]
+            file_handle.read(4)  # depth_shift (unused for export)
             num_frames = struct.unpack("Q", file_handle.read(8))[0]
             self.frames: list[RGBDFrame] = []
             for _ in range(num_frames):
@@ -248,6 +255,30 @@ def extract_label_zip(zip_path: Path, scene_dir: Path) -> Path:
     return label_dir
 
 
+def resize_depth(depth: np.ndarray, image_size: tuple[int, int]) -> np.ndarray:
+    return cv2.resize(
+        depth,
+        (image_size[1], image_size[0]),
+        interpolation=cv2.INTER_NEAREST,
+    )
+
+
+def decompress_frame_depth(
+    sensor: SensorData,
+    frame_idx: int,
+    *,
+    image_size: tuple[int, int] | None = None,
+) -> np.ndarray:
+    frame = sensor.frames[frame_idx]
+    depth_bytes = frame.decompress_depth(sensor.depth_compression_type)
+    depth = np.frombuffer(depth_bytes, dtype=np.uint16).reshape(
+        sensor.depth_height, sensor.depth_width
+    )
+    if image_size is not None:
+        depth = resize_depth(depth, image_size)
+    return depth
+
+
 def resize_label(
     label_path: Path,
     label_mapping: dict[int, int],
@@ -315,6 +346,9 @@ def build_scene(
         )
         label = resize_label(label_src, label_mapping, image_size)
         imageio.imwrite(scene_out / f"{frame_name}_y.png", label)
+
+        depth = decompress_frame_depth(sensor, frame_idx, image_size=image_size)
+        imageio.imwrite(scene_out / f"{frame_name}_depth.png", depth)
 
         pose = np.loadtxt(work_dir / "pose" / f"{frame_idx}.txt", dtype=np.float32)
         np.savez(
