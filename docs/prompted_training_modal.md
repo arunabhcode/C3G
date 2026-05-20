@@ -186,7 +186,13 @@ modal run src/inference/modal_c3g_sam.py::smoke --dataset replica \
 Vanilla SAM on one dataset frame:
 
 ```bash
-modal run src/inference/modal_vanilla_sam.py::smoke --dataset replica
+modal run src/inference/modal_vanilla_sam.py::smoke --dataset replica --wait
+```
+
+Vanilla SAM with GT prompted mode (same ``PromptSampler`` as C3G training):
+
+```bash
+modal run src/inference/modal_vanilla_sam.py::smoke --dataset replica --prompted --wait
 ```
 
 Use `modal run --detach …` for full training jobs. Shared volume paths and Hydra overrides live in `src/inference/modal_sam_common.py`.

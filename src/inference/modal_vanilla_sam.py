@@ -10,9 +10,18 @@ Detached smoke test on one dataset frame (Modal GPU; no local image/GPU)::
     modal run src/inference/modal_vanilla_sam.py::smoke --dataset replica
     modal run src/inference/modal_vanilla_sam.py::smoke --dataset scannet
 
+GT prompted mode (same centroid/random_point sampling as C3G training)::
+
+    modal run src/inference/modal_vanilla_sam.py::smoke --dataset replica --prompted --wait
+
+Segment-everything grid (8x8 automatic points)::
+
+    modal run src/inference/modal_vanilla_sam.py::smoke --dataset replica --segment-everything --wait
+
 Optional local image (reads file on your machine before upload)::
 
     modal run src/inference/modal_vanilla_sam.py --image-path path/to.jpg
+    modal run src/inference/modal_vanilla_sam.py --image-path frame.jpg --label-path frame_y.png --prompted --wait
 
 Upload SAM weights to the Modal volume (once)::
 
@@ -165,7 +174,10 @@ def _run_vanilla_sam_predict(
     return response
 
 
-def _load_smoke_image_bytes(dataset: str, dataset_root: str | None) -> tuple[bytes, str]:
+def _load_smoke_frame(
+    dataset: str,
+    dataset_root: str | None,
+) -> tuple[bytes, Path, str]:
     from src.inference.modal_sam_common import (
         DATASET_SPECS,
         find_smoke_frame,
@@ -176,7 +188,71 @@ def _load_smoke_image_bytes(dataset: str, dataset_root: str | None) -> tuple[byt
     root = resolve_dataset_root(dataset, dataset_root)
     scene_id, paths = find_smoke_frame(root, scenes=list(spec["scenes"]))  # type: ignore[arg-type]
     summary = f"{dataset} scene={scene_id} frame={paths.frame_id} ({paths.image.name})"
-    return paths.image.read_bytes(), summary
+    return paths.image.read_bytes(), paths.label, summary
+
+
+def _sample_gt_prompt_payload_fields(
+    label_path: Path,
+    *,
+    prompt_strategy: str = "centroid",
+    min_object_pixels: int = 16,
+) -> tuple[list[list[list[float]]], list[list[int]], str]:
+    """Build API point prompt fields from a GT ``*_y.png`` label map."""
+    import numpy as np
+    from PIL import Image
+
+    from src.model.prompt_sampler import PromptSampler, decompose_label_map
+
+    label_np = np.array(Image.open(label_path))
+    binary_masks = decompose_label_map(label_np)
+    if binary_masks.shape[0] == 0:
+        raise ValueError(f"No foreground objects in label map: {label_path}")
+
+    sampler = PromptSampler(
+        strategy=prompt_strategy,
+        min_object_pixels=min_object_pixels,
+    )
+    point_coords, point_labels, _ = sampler.sample(
+        binary_masks, coord_frame="original"
+    )
+    coords = point_coords.tolist()
+    labels = point_labels.tolist()
+    return [coords], [labels], f"prompt=({coords[0][0]:.1f},{coords[0][1]:.1f}) strategy={prompt_strategy}"
+
+
+def _build_predict_payload(
+    image_bytes: bytes,
+    *,
+    segment_everything: bool = False,
+    prompted: bool = False,
+    label_path: Path | None = None,
+    prompt_strategy: str = "centroid",
+    min_object_pixels: int = 16,
+) -> dict[str, Any]:
+    if prompted and segment_everything:
+        raise ValueError("Use only one of prompted=True or segment_everything=True.")
+    if prompted:
+        if label_path is None or not label_path.is_file():
+            raise FileNotFoundError(
+                f"prompted=True requires a label map; missing: {label_path}"
+            )
+        point_coords, point_labels, _ = _sample_gt_prompt_payload_fields(
+            label_path,
+            prompt_strategy=prompt_strategy,
+            min_object_pixels=min_object_pixels,
+        )
+        return {
+            "images_b64": [base64.b64encode(image_bytes).decode("ascii")],
+            "segment_everything": False,
+            "point_coords": point_coords,
+            "point_labels": point_labels,
+            "multimask_output": True,
+        }
+    return {
+        "images_b64": [base64.b64encode(image_bytes).decode("ascii")],
+        "segment_everything": segment_everything,
+        "multimask_output": True,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -245,16 +321,29 @@ try:
             dataset: DatasetName = "replica",
             dataset_root: str | None = None,
             segment_everything: bool = False,
+            prompted: bool = False,
+            prompt_strategy: str = "centroid",
+            min_object_pixels: int = 16,
         ) -> dict[str, Any]:
-            image_bytes, summary = _load_smoke_image_bytes(dataset, dataset_root)
+            image_bytes, label_path, summary = _load_smoke_frame(dataset, dataset_root)
             print(f"Smoke test image: {summary}")
-            payload = {
-                "images_b64": [base64.b64encode(image_bytes).decode("ascii")],
-                "segment_everything": segment_everything,
-                "multimask_output": True,
-            }
+            payload = _build_predict_payload(
+                image_bytes,
+                segment_everything=segment_everything,
+                prompted=prompted,
+                label_path=label_path,
+                prompt_strategy=prompt_strategy,
+                min_object_pixels=min_object_pixels,
+            )
             result = _run_vanilla_sam_predict(self.sam, self.device, payload)
             result["smoke_frame"] = summary
+            if prompted:
+                result["prompt_mode"] = "prompted"
+                result["prompt_strategy"] = prompt_strategy
+                if payload.get("point_coords"):
+                    result["point_coords"] = payload["point_coords"]
+            elif segment_everything:
+                result["prompt_mode"] = "segment_everything"
             return result
 
         @modal.fastapi_endpoint(method="POST", docs=True)
@@ -285,24 +374,49 @@ try:
 
             return api
 
+    def _validate_prompt_flags(*, prompted: bool, segment_everything: bool) -> None:
+        if prompted and segment_everything:
+            print(
+                "Choose only one of --prompted (GT centroid/random point) or "
+                "--segment-everything (fixed grid).",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+
     def _dispatch_smoke_frame(
         *,
         dataset: DatasetName,
         dataset_root: str | None,
         segment_everything: bool,
+        prompted: bool,
+        prompt_strategy: str,
+        min_object_pixels: int,
         detach: bool | None,
         wait: bool,
     ) -> None:
         from src.misc.modal_run import dispatch_remote
 
+        _validate_prompt_flags(
+            prompted=prompted, segment_everything=segment_everything
+        )
+        mode = (
+            "prompted"
+            if prompted
+            else "segment_everything"
+            if segment_everything
+            else "none"
+        )
         use_detach = resolve_detach(detach=detach, remote_job=not wait)
         result = dispatch_remote(
             VanillaSAMInference().predict_smoke_frame,
             dataset=dataset,
             dataset_root=dataset_root,
             segment_everything=segment_everything,
+            prompted=prompted,
+            prompt_strategy=prompt_strategy,
+            min_object_pixels=min_object_pixels,
             detach=use_detach,
-            job_name=f"vanilla SAM smoke ({dataset})",
+            job_name=f"vanilla SAM smoke ({mode}, {dataset})",
             app_name=APP_NAME,
         )
         if use_detach:
@@ -311,16 +425,21 @@ try:
         print(f"IoU heads: {result['iou_predictions']}")
         if "smoke_frame" in result:
             print(f"Frame: {result['smoke_frame']}")
+        if result.get("point_coords"):
+            print(f"GT prompt: {result['point_coords']}")
 
     @app.local_entrypoint()
     def smoke(
         dataset: DatasetName = "replica",
         dataset_root: str | None = None,
         segment_everything: bool = False,
+        prompted: bool = False,
+        prompt_strategy: str = "centroid",
+        min_object_pixels: int = 16,
         detach: bool | None = None,
         wait: bool = False,
     ) -> None:
-        """Detached one-image SAM smoke test using the dataset volume on Modal GPU."""
+        """One-image SAM smoke test on the dataset volume (optional GT prompted mode)."""
         if dataset not in DATASET_SPECS:
             print(
                 f"Unknown dataset {dataset!r}; choose one of: {', '.join(DATASET_SPECS)}",
@@ -331,6 +450,9 @@ try:
             dataset=dataset,
             dataset_root=dataset_root,
             segment_everything=segment_everything,
+            prompted=prompted,
+            prompt_strategy=prompt_strategy,
+            min_object_pixels=min_object_pixels,
             detach=detach,
             wait=wait,
         )
@@ -338,9 +460,13 @@ try:
     @app.local_entrypoint()
     def modal_main(
         image_path: str | None = None,
+        label_path: str | None = None,
         dataset: DatasetName = "replica",
         dataset_root: str | None = None,
         segment_everything: bool = False,
+        prompted: bool = False,
+        prompt_strategy: str = "centroid",
+        min_object_pixels: int = 16,
         smoke_test: bool = False,
         detach: bool | None = None,
         wait: bool = False,
@@ -354,11 +480,16 @@ try:
             )
             raise SystemExit(2)
 
+        _validate_prompt_flags(prompted=prompted, segment_everything=segment_everything)
+
         if smoke_test:
             _dispatch_smoke_frame(
                 dataset=dataset,
                 dataset_root=dataset_root,
                 segment_everything=segment_everything,
+                prompted=prompted,
+                prompt_strategy=prompt_strategy,
+                min_object_pixels=min_object_pixels,
                 detach=detach,
                 wait=wait,
             )
@@ -377,11 +508,19 @@ try:
             print(f"Image not found: {image_file}", file=sys.stderr)
             raise SystemExit(1)
 
-        payload = {
-            "images_b64": [base64.b64encode(image_file.read_bytes()).decode("ascii")],
-            "segment_everything": segment_everything,
-            "multimask_output": True,
-        }
+        label_file = Path(label_path) if label_path else None
+        if prompted and (label_file is None or not label_file.is_file()):
+            print("--prompted requires --label-path to a GT label PNG.", file=sys.stderr)
+            raise SystemExit(2)
+
+        payload = _build_predict_payload(
+            image_file.read_bytes(),
+            segment_everything=segment_everything,
+            prompted=prompted,
+            label_path=label_file,
+            prompt_strategy=prompt_strategy,
+            min_object_pixels=min_object_pixels,
+        )
         use_detach = resolve_detach(detach=detach, remote_job=False)
         result = dispatch_remote(
             VanillaSAMInference().predict,

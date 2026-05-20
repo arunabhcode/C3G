@@ -3,7 +3,6 @@
 import logging
 from dataclasses import dataclass
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from einops import rearrange
@@ -12,7 +11,7 @@ from torch import Tensor
 
 from ..dataset.types import BatchedExample
 from ..model.decoder.decoder import DecoderOutput
-from ..model.prompt_sampler import PromptSampler
+from ..model.prompt_sampler import PromptSampler, decompose_label_map
 from ..model.sam_decoder import SAMMaskDecoderWrapper
 from ..model.types import Gaussians
 from .loss import Loss
@@ -70,27 +69,6 @@ class LossSegmentationPrompted(
         """Compute binary cross-entropy loss with logits."""
         return F.binary_cross_entropy_with_logits(pred, target, reduction="mean")
 
-    def decompose_labels(self, label_map):
-        """Label map tensor -> (K, H, W) binary masks for non-background objects."""
-        if isinstance(label_map, torch.Tensor):
-            label_np = label_map.cpu().numpy()
-        else:
-            label_np = np.asarray(label_map)
-
-        unique_ids = np.unique(label_np)
-        non_bg_ids = unique_ids[unique_ids != 0]
-
-        if len(non_bg_ids) == 0:
-            h, w = label_np.shape
-            return torch.zeros((0, h, w), dtype=torch.float32)
-
-        masks = []
-        for obj_id in non_bg_ids:
-            mask = (label_np == obj_id).astype(np.float32)
-            masks.append(mask)
-
-        return torch.from_numpy(np.stack(masks, axis=0))
-
     def forward(
         self,
         prediction: DecoderOutput,
@@ -111,7 +89,7 @@ class LossSegmentationPrompted(
         for b in range(B):
             for v in range(V):
                 label_map = label_maps[b, v]
-                binary_masks = self.decompose_labels(label_map).to(device)
+                binary_masks = decompose_label_map(label_map).to(device)
 
                 if binary_masks.shape[0] == 0:
                     logger.warning(
