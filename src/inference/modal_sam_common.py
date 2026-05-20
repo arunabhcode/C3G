@@ -30,6 +30,7 @@ TRAINING_CONFIG_SAM: TrainingConfigName = "feature_head_sam"
 
 WEIGHTS_VOLUME = "c3g-weights"
 OUTPUT_VOLUME = "c3g-train-outputs"
+SAM_EVAL_OUTPUT_VOLUME = "sam-eval-outputs"
 REPLICA_VOLUME = "replica"
 SCANNET_VOLUME = "scannet"
 
@@ -37,6 +38,7 @@ WEIGHTS_MOUNT = Path("/weights")
 REPLICA_MOUNT = Path("/replica")
 SCANNET_MOUNT = Path("/scannet")
 OUTPUT_MOUNT = Path("/outputs")
+SAM_EVAL_OUTPUT_MOUNT = Path("/sam-eval-outputs")
 
 SAM_NUM_CHANNELS = 256
 DEFAULT_SAM_CHECKPOINT = WEIGHTS_MOUNT / "sam_vit_h.pth"
@@ -289,11 +291,12 @@ def build_prompted_test_overrides(
     wandb_mode: str = "disabled",
     training_config: TrainingConfigName = TRAINING_CONFIG_PROMPTED,
     smoke_scene: str | None = None,
-    output_mount: Path = OUTPUT_MOUNT,
+    output_mount: Path = SAM_EVAL_OUTPUT_MOUNT,
 ) -> list[str]:
     sam_path = resolve_sam_checkpoint(sam_checkpoint)
     spec = DATASET_SPECS[dataset]
     run_dir = output_mount / "runs" / run_name
+    pred_root = output_mount / "runs"
     overrides = [
         f"+training={training_config}",
         f"{spec['hydra_override_group']}={spec['hydra_add']}",
@@ -301,6 +304,7 @@ def build_prompted_test_overrides(
         f"wandb.mode={wandb_mode}",
         f"wandb.name={run_name}",
         f"hydra.run.dir={run_dir}",
+        f"test.output_path={pred_root}",
         f"train.sam_checkpoint={sam_path}",
         f"{spec['roots_key']}=[{dataset_root}]",
         "test.save_compare=true",

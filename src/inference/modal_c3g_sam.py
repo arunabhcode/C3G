@@ -2,7 +2,8 @@
 """Modal runner for C3G-F + SAM evaluation (Hydra ``mode=test``).
 
 Runs one test batch on ``replica_2dseg`` or ``scannet_2dseg`` data from Modal
-volumes. Requires a trained checkpoint on the ``c3g-train-outputs`` volume.
+volumes. Checkpoints are read from ``c3g-train-outputs``; predictions are
+written to the ``sam-eval-outputs`` volume.
 
 Prerequisites::
 
@@ -37,6 +38,8 @@ from src.inference.modal_sam_common import (
     OUTPUT_VOLUME,
     REPLICA_MOUNT,
     REPLICA_VOLUME,
+    SAM_EVAL_OUTPUT_MOUNT,
+    SAM_EVAL_OUTPUT_VOLUME,
     SCANNET_MOUNT,
     SCANNET_VOLUME,
     WEIGHTS_MOUNT,
@@ -78,7 +81,8 @@ inference_image = build_c3g_modal_image()
 weights_volume = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
 replica_volume = modal.Volume.from_name(REPLICA_VOLUME, create_if_missing=True)
 scannet_volume = modal.Volume.from_name(SCANNET_VOLUME, create_if_missing=True)
-output_volume = modal.Volume.from_name(OUTPUT_VOLUME, create_if_missing=True)
+train_output_volume = modal.Volume.from_name(OUTPUT_VOLUME, create_if_missing=True)
+eval_output_volume = modal.Volume.from_name(SAM_EVAL_OUTPUT_VOLUME, create_if_missing=True)
 
 
 @app.function(
@@ -89,7 +93,8 @@ output_volume = modal.Volume.from_name(OUTPUT_VOLUME, create_if_missing=True)
         str(WEIGHTS_MOUNT): weights_volume,
         str(REPLICA_MOUNT): replica_volume,
         str(SCANNET_MOUNT): scannet_volume,
-        str(OUTPUT_MOUNT): output_volume,
+        str(OUTPUT_MOUNT): train_output_volume,
+        str(SAM_EVAL_OUTPUT_MOUNT): eval_output_volume,
     },
 )
 def eval_c3g_sam(
@@ -122,16 +127,20 @@ def eval_c3g_sam(
         sam_checkpoint=sam_path,
         smoke_scene=smoke_scene,
     )
+    overrides.append("data_loader.test.batch_size=4")
 
     cmd = ["uv", "run", "--no-sync", "python", "-m", "src.main", *overrides]
     print("Running:", " ".join(shlex.quote(part) for part in cmd))
     subprocess.run(cmd, check=True, cwd=str(C3G_MODAL_WORKSPACE))
 
-    run_dir = OUTPUT_MOUNT / "runs" / run_name
-    output_volume.commit()
+    run_dir = SAM_EVAL_OUTPUT_MOUNT / "runs" / run_name
+    pred_dir = run_dir / run_name
+    eval_output_volume.commit()
     label = "Smoke eval" if smoke else "Eval"
-    print(f"{label} complete. Artifacts under {run_dir} (volume `{OUTPUT_VOLUME}`).")
-    return str(run_dir)
+    print(f"{label} complete.")
+    print(f"  Hydra logs:     {run_dir} (volume `{SAM_EVAL_OUTPUT_VOLUME}`)")
+    print(f"  Predictions:    {pred_dir}/<scene>/seg/ (and comparison PNGs at {pred_dir}/)")
+    return str(pred_dir)
 
 
 def _dispatch_eval(

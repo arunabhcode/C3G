@@ -235,13 +235,14 @@ Defaults: top 5 checkpoints every 10,000 steps (`checkpointing.every_n_train_ste
 
 ### Evaluation visualizations
 
-With `test.save_compare=true`, per-scene mask overlays:
+With `test.save_compare=true`, per-scene mask overlays are written to the
+`sam-eval-outputs` volume (not `c3g-train-outputs`):
 
 ```
-/outputs/runs/<wandb.name>/<scene>/seg/
+/sam-eval-outputs/runs/<wandb.name>/<scene>/seg/
 ```
 
-Download with `modal volume get c3g-train-outputs ...`.
+Download with `modal volume get sam-eval-outputs ...`.
 
 ### Wandb monitoring
 

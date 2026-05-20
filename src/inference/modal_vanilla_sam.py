@@ -48,6 +48,8 @@ def _build_image():
             "pillow==11.0.0",
             "fastapi==0.118.0",
             "pydantic==2.11.4",
+        )
+        .pip_install(
             "torch==2.5.1",
             "torchvision==0.20.1",
             index_url="https://download.pytorch.org/whl/cu124",
@@ -205,7 +207,7 @@ try:
 
     @app.cls(
         image=inference_image,
-        gpu="A10G",
+        gpu="A100-40G",
         volumes={
             str(WEIGHTS_MOUNT): weights_volume,
             str(REPLICA_MOUNT): replica_volume,
