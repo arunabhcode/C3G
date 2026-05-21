@@ -10,13 +10,25 @@ Writes one directory per scene under the output root::
 
 Also writes ``scannetv2-labels.combined.tsv`` and ``selected_seqs_test.json``.
 
-Run on Modal::
+Run on Modal (default: 712-scene 2D benchmark train+test; skips scenes on volume)::
 
-    modal run src/dataset/download_scannet.py
+    modal run src/dataset/download_scannet.py --accept-tos
 
-Run detached::
+All 807 scenes with public ``_2d-label-filt.zip``::
+
+    modal run src/dataset/download_scannet.py --accept-tos --split all
+
+Disconnect the local client but keep the job running on Modal::
 
     modal run --detach src/dataset/download_scannet.py --accept-tos
+
+Block until all scenes finish (prints per-scene results)::
+
+    modal run src/dataset/download_scannet.py --accept-tos --wait
+
+Re-upload all scenes::
+
+    modal run src/dataset/download_scannet.py --accept-tos --force
 
 Run locally::
 
@@ -30,6 +42,7 @@ import csv
 import json
 import os
 import shutil
+import time
 import ssl
 import struct
 import sys
@@ -51,8 +64,27 @@ RELEASE = "v2/scans"
 RELEASE_TASKS = "v2/tasks"
 LABEL_MAP_FILE = "scannetv2-labels.combined.tsv"
 
-# 15 scenes with 2D semantic labels (scene0697_00 … scene0711_00).
-SCENES: tuple[str, ...] = tuple(f"scene{i:04d}_00" for i in range(697, 712))
+# ScanNet has ~1513 scans total; this script only prepares scenes that ship
+# ``_2d-label-filt.zip`` (2D semantic seg). On the public server that is every
+# ``scene0000_00`` … ``scene0806_00`` (807 scenes). The 2D benchmark split is
+# 697 train (scene0000_00–scene0696_00) + 15 test (scene0697_00–scene0711_00).
+SCENES_TEST_2D: tuple[str, ...] = tuple(f"scene{i:04d}_00" for i in range(697, 712))
+SCENES_TRAIN_2D: tuple[str, ...] = tuple(f"scene{i:04d}_00" for i in range(0, 697))
+SCENES_BENCHMARK_2D: tuple[str, ...] = SCENES_TRAIN_2D + SCENES_TEST_2D
+SCENES_ALL_2D: tuple[str, ...] = tuple(f"scene{i:04d}_00" for i in range(0, 807))
+
+SCENE_SPLITS: dict[str, tuple[str, ...]] = {
+    "test": SCENES_TEST_2D,
+    "train": SCENES_TRAIN_2D,
+    "benchmark": SCENES_BENCHMARK_2D,
+    "all": SCENES_ALL_2D,
+}
+SCENES: tuple[str, ...] = SCENES_BENCHMARK_2D
+
+
+def sens_uses_v1_release(scan_id: str) -> bool:
+    """``.sens`` for scene0000_00–scene0706_00 is on v1; scene0707_00+ on v2."""
+    return int(scan_id[5:9]) < 707
 
 FRAME_SKIP = 20
 IMAGE_SIZE = (480, 640)  # (height, width)
@@ -61,9 +93,13 @@ VOLUME_NAME = "scannet"
 VOLUME_MOUNT = Path("/scannet")
 RAW_SUBDIR = "_raw"
 MODAL_RAW_SCRATCH = Path("/tmp/scannet_raw")
-
-# Train scenes reuse v1 .sens streams; later scenes use v2.
-V1_SENS_SCENES = frozenset(f"scene{i:04d}_00" for i in range(697, 707))
+SCENE_COMPLETE_MARKER = ".complete"
+SCENE_PREPARE_LOCK = ".preparing"
+# Stale lock threshold: another worker may reclaim after this many seconds.
+STALE_LOCK_SECONDS = 2 * 60 * 60
+SELECTED_SEQS_FILE = "selected_seqs_test.json"
+# Modal: one scene per container; cap parallel commits (Modal recommends ~5).
+MODAL_MAX_PARALLEL_SCENES = 5
 
 COMPRESSION_TYPE_COLOR = {-1: "unknown", 0: "raw", 1: "png", 2: "jpeg"}
 COMPRESSION_TYPE_DEPTH = {-1: "unknown", 0: "raw_ushort", 1: "zlib_ushort", 2: "occi_ushort"}
@@ -71,6 +107,14 @@ COMPRESSION_TYPE_DEPTH = {-1: "unknown", 0: "raw_ushort", 1: "zlib_ushort", 2: "
 
 def format_frame_id(frame_index: int) -> str:
     return f"{frame_index:0{FRAME_ID_WIDTH}d}"
+
+
+def resolve_scene_split(split: str) -> tuple[str, ...]:
+    try:
+        return SCENE_SPLITS[split]
+    except KeyError:
+        valid = ", ".join(sorted(SCENE_SPLITS))
+        raise SystemExit(f"Unknown --split {split!r}; choose one of: {valid}") from None
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +349,7 @@ def build_scene(
     scene_raw = raw_dir / scan_id
     sens_path = scene_raw / f"{scan_id}.sens"
     label_zip = scene_raw / f"{scan_id}_2d-label-filt.zip"
-    use_v1_sens = scan_id in V1_SENS_SCENES
+    use_v1_sens = sens_uses_v1_release(scan_id)
 
     if not sens_path.is_file():
         download_scan_file(scan_id, ".sens", scene_raw, use_v1_sens=use_v1_sens)
@@ -360,12 +404,205 @@ def build_scene(
     return frame_names
 
 
+def read_scene_complete_marker(scene_dir: Path) -> list[str] | None:
+    marker = scene_dir / SCENE_COMPLETE_MARKER
+    if not marker.is_file():
+        return None
+    try:
+        payload = json.loads(marker.read_text())
+    except json.JSONDecodeError:
+        return None
+    frames = payload.get("frames")
+    if not isinstance(frames, list) or not frames:
+        return None
+    return [str(frame_id) for frame_id in frames]
+
+
+def read_selected_seqs_manifest(out_root: Path) -> dict[str, list[str]]:
+    manifest_path = out_root / SELECTED_SEQS_FILE
+    if not manifest_path.is_file():
+        return {}
+    try:
+        payload = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        str(scan_id): [str(frame_id) for frame_id in frame_ids]
+        for scan_id, frame_ids in payload.items()
+        if isinstance(frame_ids, list) and frame_ids
+    }
+
+
+def _frames_have_required_files(scene_dir: Path, frame_ids: list[str]) -> bool:
+    if not frame_ids:
+        return False
+    return all(
+        (scene_dir / f"{frame_id}_x.jpg").is_file()
+        and (scene_dir / f"{frame_id}_y.png").is_file()
+        and (scene_dir / f"{frame_id}_cam.npz").is_file()
+        for frame_id in frame_ids
+    )
+
+
+def list_valid_frame_ids(scene_dir: Path) -> list[str]:
+    """Frame ids with RGB, label, and camera files present (volume layout)."""
+    if not scene_dir.is_dir():
+        return []
+    frame_ids: list[str] = []
+    for image_path in scene_dir.glob("*_x.jpg"):
+        if not image_path.is_file():
+            continue
+        frame_id = image_path.name[: -len("_x.jpg")]
+        if _frames_have_required_files(scene_dir, [frame_id]):
+            frame_ids.append(frame_id)
+    return sorted(frame_ids)
+
+
+def get_scene_frame_ids(
+    scene_dir: Path,
+    *,
+    manifest: dict[str, list[str]] | None = None,
+    scan_id: str | None = None,
+) -> list[str] | None:
+    """Return frame ids when the scene is already prepared on disk; else None."""
+    if not scene_dir.is_dir():
+        return None
+
+    if manifest and scan_id and scan_id in manifest:
+        expected = manifest[scan_id]
+        if _frames_have_required_files(scene_dir, expected):
+            return expected
+        return None
+
+    marker_frames = read_scene_complete_marker(scene_dir)
+    if marker_frames and _frames_have_required_files(scene_dir, marker_frames):
+        return marker_frames
+
+    on_disk = list_valid_frame_ids(scene_dir)
+    return on_disk if on_disk else None
+
+
+def scene_is_complete(
+    scene_dir: Path,
+    *,
+    manifest: dict[str, list[str]] | None = None,
+    scan_id: str | None = None,
+) -> bool:
+    return get_scene_frame_ids(scene_dir, manifest=manifest, scan_id=scan_id) is not None
+
+
+def backfill_scene_complete_marker(scene_dir: Path, frame_ids: list[str]) -> None:
+    if frame_ids and not (scene_dir / SCENE_COMPLETE_MARKER).is_file():
+        mark_scene_complete(scene_dir, frame_ids)
+
+
+def mark_scene_complete(scene_dir: Path, frame_names: list[str]) -> None:
+    marker = scene_dir / SCENE_COMPLETE_MARKER
+    marker.write_text(json.dumps({"frames": frame_names}, indent=2))
+
+
+def _lock_is_stale(lock_path: Path) -> bool:
+    if not lock_path.is_file():
+        return True
+    return (time.time() - lock_path.stat().st_mtime) > STALE_LOCK_SECONDS
+
+
+def try_claim_scene(out_root: Path, scan_id: str) -> bool:
+    """Return True if this worker should prepare ``scan_id``."""
+    scene_out = out_root / scan_id
+    scene_out.mkdir(parents=True, exist_ok=True)
+    lock_path = scene_out / SCENE_PREPARE_LOCK
+    if lock_path.is_file() and not _lock_is_stale(lock_path):
+        return False
+    lock_path.unlink(missing_ok=True)
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w") as lock_file:
+        lock_file.write(f"pid={os.getpid()}\n")
+    return True
+
+
+def release_scene_claim(scene_dir: Path) -> None:
+    (scene_dir / SCENE_PREPARE_LOCK).unlink(missing_ok=True)
+
+
+def write_selected_seqs_manifest(
+    out_root: Path,
+    *,
+    scenes: tuple[str, ...] = SCENES,
+) -> dict[str, list[str]]:
+    selected_seqs: dict[str, list[str]] = {}
+    for scan_id in scenes:
+        scene_dir = out_root / scan_id
+        frame_names = get_scene_frame_ids(scene_dir, scan_id=scan_id)
+        if frame_names:
+            backfill_scene_complete_marker(scene_dir, frame_names)
+            selected_seqs[scan_id] = frame_names
+    manifest_path = out_root / SELECTED_SEQS_FILE
+    with open(manifest_path, "w") as file_handle:
+        json.dump(selected_seqs, file_handle, indent=2)
+    return selected_seqs
+
+
+def prepare_scene_if_needed(
+    scan_id: str,
+    raw_dir: Path,
+    out_root: Path,
+    label_map_file: Path,
+    *,
+    frame_skip: int = FRAME_SKIP,
+    image_size: tuple[int, int] = IMAGE_SIZE,
+    force: bool = False,
+    manifest: dict[str, list[str]] | None = None,
+) -> tuple[str, list[str], str]:
+    """Prepare one scene. Returns ``(scan_id, frame_names, status)``."""
+    scene_out = out_root / scan_id
+    if manifest is None:
+        manifest = read_selected_seqs_manifest(out_root)
+
+    if not force:
+        frame_names = get_scene_frame_ids(scene_out, manifest=manifest, scan_id=scan_id)
+        if frame_names:
+            backfill_scene_complete_marker(scene_out, frame_names)
+            return scan_id, frame_names, f"skipped (already on volume, {len(frame_names)} frames)"
+
+    if not force and not try_claim_scene(out_root, scan_id):
+        frame_names = get_scene_frame_ids(scene_out, manifest=manifest, scan_id=scan_id)
+        if frame_names:
+            backfill_scene_complete_marker(scene_out, frame_names)
+            return scan_id, frame_names, f"skipped (completed by peer, {len(frame_names)} frames)"
+        return scan_id, [], "skipped (in progress elsewhere)"
+
+    try:
+        print(f"Preparing {scan_id} ...")
+        frame_names = build_scene(
+            scan_id,
+            raw_dir,
+            out_root,
+            label_map_file,
+            frame_skip=frame_skip,
+            image_size=image_size,
+        )
+        if frame_names:
+            mark_scene_complete(scene_out, frame_names)
+        status = f"uploaded ({len(frame_names)} frames)"
+        print(f"  {scan_id}: {status}")
+        return scan_id, frame_names, status
+    finally:
+        release_scene_claim(scene_out)
+
+
 def prepare_scannet(
     out_root: str | os.PathLike[str],
     *,
     scenes: tuple[str, ...] = SCENES,
     accept_tos: bool = False,
     raw_dir: str | os.PathLike[str] | None = None,
+    force: bool = False,
 ) -> None:
     if not accept_tos:
         print(
@@ -382,17 +619,16 @@ def prepare_scannet(
 
     label_map_path = download_label_map(out_root)
 
-    selected_seqs: dict[str, list[str]] = {}
     for scan_id in scenes:
-        print(f"Preparing {scan_id} ...")
-        frame_names = build_scene(scan_id, raw_dir, out_root, label_map_path)
-        if frame_names:
-            selected_seqs[scan_id] = frame_names
-        print(f"  {len(frame_names)} frames")
+        prepare_scene_if_needed(
+            scan_id,
+            raw_dir,
+            out_root,
+            label_map_path,
+            force=force,
+        )
 
-    with open(out_root / "selected_seqs_test.json", "w") as file_handle:
-        json.dump(selected_seqs, file_handle, indent=2)
-
+    selected_seqs = write_selected_seqs_manifest(out_root, scenes=scenes)
     print(f"Done. {len(selected_seqs)} scenes under {out_root}")
     print(f"Point dataset configs at: dataset.scannet_2dseg.roots=[{out_root}]")
 
@@ -420,34 +656,83 @@ try:
     @app.function(
         image=image,
         volumes={str(VOLUME_MOUNT): scannet_volume},
-        timeout=60 * 60 * 12,
+        timeout=60 * 60 * 6,
         cpu=4,
         memory=32768,
+        max_containers=MODAL_MAX_PARALLEL_SCENES,
     )
-    def populate_scannet_volume() -> None:
-        # Keep bulky .sens / label zips off the Modal volume (only prepared frames are committed).
+    def prepare_one_scene(scan_id: str, *, force: bool = False) -> str:
+        """Download and upload a single scene if it is not already on the volume."""
+        scannet_volume.reload()
+        scene_out = VOLUME_MOUNT / scan_id
+        manifest = read_selected_seqs_manifest(VOLUME_MOUNT)
+        if not force:
+            frames = get_scene_frame_ids(scene_out, manifest=manifest, scan_id=scan_id)
+            if frames:
+                backfill_scene_complete_marker(scene_out, frames)
+                scannet_volume.commit()
+                return f"{scan_id}: skipped (already on volume, {len(frames)} frames)"
+
         if MODAL_RAW_SCRATCH.exists():
             shutil.rmtree(MODAL_RAW_SCRATCH)
         MODAL_RAW_SCRATCH.mkdir(parents=True, exist_ok=True)
         try:
-            prepare_scannet(
+            label_map_path = download_label_map(VOLUME_MOUNT)
+            _, frame_names, status = prepare_scene_if_needed(
+                scan_id,
+                MODAL_RAW_SCRATCH,
                 VOLUME_MOUNT,
-                accept_tos=True,
-                raw_dir=MODAL_RAW_SCRATCH,
+                label_map_path,
+                force=force,
+                manifest=manifest,
             )
+            if "skipped" not in status:
+                scannet_volume.commit()
+            return f"{scan_id}: {status}"
         finally:
             shutil.rmtree(MODAL_RAW_SCRATCH, ignore_errors=True)
 
+    @app.function(
+        image=image,
+        volumes={str(VOLUME_MOUNT): scannet_volume},
+        timeout=60 * 10,
+        cpu=1,
+    )
+    def finalize_scannet_volume(scenes: tuple[str, ...]) -> str:
+        """Rebuild ``selected_seqs_test.json`` and drop any stray raw cache on the volume."""
+        scannet_volume.reload()
         raw_on_volume = VOLUME_MOUNT / RAW_SUBDIR
         if raw_on_volume.exists():
             shutil.rmtree(raw_on_volume)
-
+        selected_seqs = write_selected_seqs_manifest(VOLUME_MOUNT, scenes=scenes)
         scannet_volume.commit()
+        return f"manifest: {len(selected_seqs)} scenes"
+
+    @app.function(
+        image=image,
+        volumes={str(VOLUME_MOUNT): scannet_volume},
+        timeout=60 * 60 * 12,
+        cpu=2,
+        memory=8192,
+    )
+    def populate_scannet_volume(
+        scenes: tuple[str, ...],
+        *,
+        force: bool = False,
+    ) -> list[str]:
+        """Prepare scenes in parallel (skipping those already on the volume)."""
+        results = list(prepare_one_scene.map(scenes, kwargs={"force": force}))
+        summary = finalize_scannet_volume.remote(scenes)
+        results.append(summary)
+        return results
 
     @app.local_entrypoint()
-    def modal_main(accept_tos: bool = False, detach: bool = False) -> None:
-        from src.misc.modal_run import dispatch_remote
-
+    def modal_main(
+        accept_tos: bool = False,
+        force: bool = False,
+        wait: bool = False,
+        split: str = "benchmark",
+    ) -> None:
         if not accept_tos:
             print(
                 "By continuing you confirm agreement to the ScanNet terms of use:\n"
@@ -455,12 +740,22 @@ try:
                 "Re-run with --accept-tos to proceed."
             )
             sys.exit(1)
-        dispatch_remote(
-            populate_scannet_volume,
-            detach=detach,
-            job_name="ScanNet volume populate",
-            app_name=app.name,
-        )
+
+        # Always spawn first: ``modal run --detach`` disconnects the local client and
+        # does not set a ``detach`` entrypoint flag. Blocking .remote() here often
+        # never reaches Modal before the CLI exits.
+        scenes = resolve_scene_split(split)
+        handle = populate_scannet_volume.spawn(scenes, force=force)
+        print(f"Started ScanNet volume populate on Modal ({len(scenes)} scenes, split={split}).")
+        print(f"  call_id: {handle.object_id}")
+        print(f"  logs:    modal app logs {app.name}")
+        print("  status:  modal app list")
+
+        if wait:
+            results = handle.get()
+            print("Finished. Results:")
+            for line in results:
+                print(f"  {line}")
 
 except ImportError:
     app = None  # type: ignore[assignment]
@@ -487,17 +782,41 @@ def main() -> None:
         action="store_true",
         help="Populate the Modal volume via modal run (requires modal package).",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download and overwrite scenes even if already present.",
+    )
+    parser.add_argument(
+        "--split",
+        choices=tuple(SCENE_SPLITS),
+        default="benchmark",
+        help=(
+            "Which 2D-labeled scenes to fetch: "
+            "test (15), train (697), benchmark (712 train+test), all (807)."
+        ),
+    )
     args = parser.parse_args()
+    scenes = resolve_scene_split(args.split)
 
     if args.modal:
         if app is None:
             print("Install modal (`pip install modal`) to use --modal.", file=sys.stderr)
             sys.exit(1)
-        modal_main(accept_tos=args.accept_tos)  # type: ignore[misc]
+        modal_main(  # type: ignore[misc]
+            accept_tos=args.accept_tos,
+            force=args.force,
+            split=args.split,
+        )
         return
 
     out_dir = args.out_dir or Path("datasets") / VOLUME_NAME
-    prepare_scannet(out_dir, accept_tos=args.accept_tos)
+    prepare_scannet(
+        out_dir,
+        scenes=scenes,
+        accept_tos=args.accept_tos,
+        force=args.force,
+    )
 
 
 if __name__ == "__main__":
