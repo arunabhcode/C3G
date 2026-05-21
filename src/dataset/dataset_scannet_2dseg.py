@@ -8,6 +8,12 @@ Expects data prepared by :mod:`download_scannet` on the Modal ``scannet`` volume
 
 Sampling, preprocessing, and batch layout match :mod:`dataset_replica_2dseg`
 and :mod:`dataset_replica_semseg`; only scene ids and on-disk paths differ.
+
+Each yielded sample has ``view_sampler.num_context_views`` context frames (typically
+2) and ``view_sampler.num_target_views`` target frames. When the sampler returns
+more targets than that (e.g. test mode), the dataset subsamples without replacement;
+scenes with fewer candidates are skipped. Configure targets via
+``dataset.scannet_2dseg.view_sampler.num_target_views`` only.
 """
 
 from __future__ import annotations
@@ -182,125 +188,128 @@ class DatasetScannet2dSeg(IterableDataset):
             context_indices = context_indices.tolist()
             target_indices = target_indices.tolist()
 
-            for target_idx in target_indices:
-                idxs = list(context_indices) + [target_idx]
+            num_target_views = self.view_sampler.num_target_views
+            if len(target_indices) < num_target_views:
+                continue
 
-                extrinsics_list = []
-                intrinsics_list = []
-                images_list = []
-                label_list = []
-                valid = True
+            perm = torch.randperm(len(target_indices))[:num_target_views]
+            sampled_target_indices = [target_indices[i] for i in perm.tolist()]
+            idxs = list(context_indices) + sampled_target_indices
 
-                for view_index in idxs:
-                    frame_id = frame_ids[view_index]
-                    paths = FramePaths.from_frame_id(self.root / scene, frame_id)
+            extrinsics_list = []
+            intrinsics_list = []
+            images_list = []
+            label_list = []
+            valid = True
 
-                    if not paths.image.is_file() or not paths.label.is_file():
-                        logger.warning(
-                            f"Missing files for {scene} frame {frame_id}"
-                        )
-                        valid = False
-                        break
+            for view_index in idxs:
+                frame_id = frame_ids[view_index]
+                paths = FramePaths.from_frame_id(self.root / scene, frame_id)
 
-                    rgb = cv2.imread(str(paths.image), cv2.IMREAD_COLOR)
-                    if rgb is None:
-                        logger.warning(f"Could not read {paths.image}, skipping")
-                        valid = False
-                        break
-                    rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+                if not paths.image.is_file() or not paths.label.is_file():
+                    logger.warning(f"Missing files for {scene} frame {frame_id}")
+                    valid = False
+                    break
 
-                    label_map = cv2.imread(str(paths.label), cv2.IMREAD_UNCHANGED)
-                    if label_map is None:
-                        logger.warning(f"Could not read {paths.label}, skipping")
-                        valid = False
-                        break
+                rgb = cv2.imread(str(paths.image), cv2.IMREAD_COLOR)
+                if rgb is None:
+                    logger.warning(f"Could not read {paths.image}, skipping")
+                    valid = False
+                    break
+                rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
 
-                    h_target, w_target = self.cfg.input_image_shape
-                    rgb_resized = cv2.resize(
-                        rgb, (w_target, h_target), interpolation=cv2.INTER_LINEAR
-                    )
-                    label_resized = cv2.resize(
-                        label_map, (w_target, h_target), interpolation=cv2.INTER_NEAREST
-                    )
+                label_map = cv2.imread(str(paths.label), cv2.IMREAD_UNCHANGED)
+                if label_map is None:
+                    logger.warning(f"Could not read {paths.label}, skipping")
+                    valid = False
+                    break
 
-                    intrinsics = self.intrinsics.copy()
-                    orig_h, orig_w = self.cfg.original_image_shape
-                    intrinsics[0, :] *= w_target / orig_w
-                    intrinsics[1, :] *= h_target / orig_h
+                h_target, w_target = self.cfg.input_image_shape
+                rgb_resized = cv2.resize(
+                    rgb, (w_target, h_target), interpolation=cv2.INTER_LINEAR
+                )
+                label_resized = cv2.resize(
+                    label_map, (w_target, h_target), interpolation=cv2.INTER_NEAREST
+                )
 
-                    intrinsics[0, :] /= w_target
-                    intrinsics[1, :] /= h_target
+                intrinsics = self.intrinsics.copy()
+                orig_h, orig_w = self.cfg.original_image_shape
+                intrinsics[0, :] *= w_target / orig_w
+                intrinsics[1, :] *= h_target / orig_h
 
-                    if not paths.camera.is_file():
-                        logger.warning(f"Missing camera file {paths.camera}, skipping")
-                        valid = False
-                        break
+                intrinsics[0, :] /= w_target
+                intrinsics[1, :] /= h_target
 
-                    metadata = np.load(paths.camera)
-                    pose = metadata["camera_pose"].astype(np.float32)
-                    if np.any(np.isinf(pose)) or np.any(np.isnan(pose)):
-                        valid = False
-                        break
+                if not paths.camera.is_file():
+                    logger.warning(f"Missing camera file {paths.camera}, skipping")
+                    valid = False
+                    break
 
-                    extrinsics_list.append(pose)
-                    intrinsics_list.append(intrinsics)
-                    images_list.append(self.to_tensor(Image.fromarray(rgb_resized)))
-                    label_list.append(
-                        torch.from_numpy(label_resized.astype(np.int64)).unsqueeze(0)
-                    )
+                metadata = np.load(paths.camera)
+                pose = metadata["camera_pose"].astype(np.float32)
+                if np.any(np.isinf(pose)) or np.any(np.isnan(pose)):
+                    valid = False
+                    break
 
-                if not valid or len(extrinsics_list) < len(idxs):
+                extrinsics_list.append(pose)
+                intrinsics_list.append(intrinsics)
+                images_list.append(self.to_tensor(Image.fromarray(rgb_resized)))
+                label_list.append(
+                    torch.from_numpy(label_resized.astype(np.int64))
+                )
+
+            if not valid or len(extrinsics_list) < len(idxs):
+                continue
+
+            extrinsics = torch.from_numpy(
+                np.stack(extrinsics_list, axis=0).astype(np.float32)
+            )
+            intrinsics = torch.from_numpy(
+                np.stack(intrinsics_list, axis=0).astype(np.float32)
+            )
+            images = torch.stack(images_list, dim=0)
+            labels = torch.stack(label_list, dim=0)
+
+            num_ctx = self.view_sampler.num_context_views
+            context_extrinsics = extrinsics[:num_ctx]
+
+            if self.cfg.make_baseline_1:
+                a, b = context_extrinsics[0, :3, 3], context_extrinsics[-1, :3, 3]
+                scale = (a - b).norm()
+                if scale < self.cfg.baseline_min or scale > self.cfg.baseline_max:
                     continue
+                extrinsics[:, :3, 3] /= scale
+            else:
+                scale = 1.0
 
-                extrinsics = torch.from_numpy(
-                    np.stack(extrinsics_list, axis=0).astype(np.float32)
-                )
-                intrinsics = torch.from_numpy(
-                    np.stack(intrinsics_list, axis=0).astype(np.float32)
-                )
-                images = torch.stack(images_list, dim=0)
-                labels = torch.cat(label_list, dim=0)
+            if self.cfg.relative_pose:
+                extrinsics = camera_normalization(extrinsics[0:1], extrinsics)
 
-                num_ctx = self.view_sampler.num_context_views
-                context_extrinsics = extrinsics[:num_ctx]
+            context_frame_ids = [int(frame_ids[i]) for i in context_indices]
+            target_frame_ids = [int(frame_ids[i]) for i in sampled_target_indices]
 
-                if self.cfg.make_baseline_1:
-                    a, b = context_extrinsics[0, :3, 3], context_extrinsics[-1, :3, 3]
-                    scale = (a - b).norm()
-                    if scale < self.cfg.baseline_min or scale > self.cfg.baseline_max:
-                        continue
-                    extrinsics[:, :3, 3] /= scale
-                else:
-                    scale = 1.0
-
-                if self.cfg.relative_pose:
-                    extrinsics = camera_normalization(extrinsics[0:1], extrinsics)
-
-                context_frame_ids = [int(frame_ids[i]) for i in context_indices]
-                target_frame_id = int(frame_ids[target_idx])
-
-                yield {
-                    "context": {
-                        "extrinsics": extrinsics[:num_ctx],
-                        "intrinsics": intrinsics[:num_ctx],
-                        "image": images[:num_ctx],
-                        "label": labels[:num_ctx],
-                        "near": self.get_bound("near", num_ctx) / scale,
-                        "far": self.get_bound("far", num_ctx) / scale,
-                        "index": torch.tensor(context_frame_ids, dtype=torch.int64),
-                        "overlap": overlap,
-                    },
-                    "target": {
-                        "extrinsics": extrinsics[num_ctx:],
-                        "intrinsics": intrinsics[num_ctx:],
-                        "image": images[num_ctx:],
-                        "label": labels[num_ctx:],
-                        "near": self.get_bound("near", 1) / scale,
-                        "far": self.get_bound("far", 1) / scale,
-                        "index": torch.tensor([target_frame_id], dtype=torch.int64),
-                    },
-                    "scene": scene,
-                }
+            yield {
+                "context": {
+                    "extrinsics": extrinsics[:num_ctx],
+                    "intrinsics": intrinsics[:num_ctx],
+                    "image": images[:num_ctx],
+                    "label": labels[:num_ctx],
+                    "near": self.get_bound("near", num_ctx) / scale,
+                    "far": self.get_bound("far", num_ctx) / scale,
+                    "index": torch.tensor(context_frame_ids, dtype=torch.int64),
+                    "overlap": overlap,
+                },
+                "target": {
+                    "extrinsics": extrinsics[num_ctx:],
+                    "intrinsics": intrinsics[num_ctx:],
+                    "image": images[num_ctx:],
+                    "label": labels[num_ctx:],
+                    "near": self.get_bound("near", num_target_views) / scale,
+                    "far": self.get_bound("far", num_target_views) / scale,
+                    "index": torch.tensor(target_frame_ids, dtype=torch.int64),
+                },
+                "scene": scene,
+            }
 
     def get_bound(self, bound, num_views):
         """Get near/far bound repeated for num_views."""
