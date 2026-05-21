@@ -96,6 +96,7 @@ DATASET_SPECS: dict[DatasetName, dict[str, str | list[str]]] = {
     "replica": {
         "hydra_add": "replica_2dseg",
         "hydra_override_group": "dataset@dataset.replica_semseg",
+        "dataset_cfg_key": "dataset.replica_2dseg",
         "roots_key": "dataset.replica_2dseg.roots",
         "overfit_key": "dataset.replica_2dseg.overfit_to_scene",
         # Prepared flat-frame Replica dataset lives on the Modal volume mounted here.
@@ -107,6 +108,7 @@ DATASET_SPECS: dict[DatasetName, dict[str, str | list[str]]] = {
     "scannet": {
         "hydra_add": "scannet_2dseg",
         "hydra_override_group": "dataset@dataset.scannet_semseg",
+        "dataset_cfg_key": "dataset.scannet_2dseg",
         "roots_key": "dataset.scannet_2dseg.roots",
         "overfit_key": "dataset.scannet_2dseg.overfit_to_scene",
         "default_root": str(SCANNET_MOUNT),
@@ -223,6 +225,8 @@ def build_sam_train_overrides(
     prompt_strategy: str | None = None,
     prompted_seg_loss_weight: float | None = None,
     min_object_pixels: int | None = None,
+    max_distance_between_context_views: int = 10,
+    min_distance_between_context_views: int = 2,
     resume: str | None,
     output_mount: Path = OUTPUT_MOUNT,
     smoke_scene: str | None = None,
@@ -245,6 +249,9 @@ def build_sam_train_overrides(
         f"model.encoder.pretrained_weights={encoder_weights}",
         f"train.sam_checkpoint={sam_path}",
         f"{spec['roots_key']}=[{dataset_root}]",
+        f"{spec['dataset_cfg_key']}.view_sampler.max_distance_between_context_views={max_distance_between_context_views}",
+        f"{spec['dataset_cfg_key']}.view_sampler.min_distance_between_context_views={min_distance_between_context_views}",
+        f"{spec['dataset_cfg_key']}.view_sampler.warm_up_steps=0",
     ]
     if training_config == TRAINING_CONFIG_PROMPTED:
         if prompt_strategy is not None:
@@ -276,6 +283,8 @@ def build_prompted_train_overrides(
     prompt_strategy: str,
     prompted_seg_loss_weight: float,
     min_object_pixels: int,
+    max_distance_between_context_views: int = 10,
+    min_distance_between_context_views: int = 2,
     resume: str | None,
     output_mount: Path = OUTPUT_MOUNT,
     smoke_scene: str | None = None,
@@ -295,6 +304,8 @@ def build_prompted_train_overrides(
         prompt_strategy=prompt_strategy,
         prompted_seg_loss_weight=prompted_seg_loss_weight,
         min_object_pixels=min_object_pixels,
+        max_distance_between_context_views=max_distance_between_context_views,
+        min_distance_between_context_views=min_distance_between_context_views,
         resume=resume,
         output_mount=output_mount,
         smoke_scene=smoke_scene,

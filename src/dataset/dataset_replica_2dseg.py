@@ -27,6 +27,7 @@ from torch.utils.data import IterableDataset
 from ..misc.cam_utils import camera_normalization
 from ..misc.frame_layout import FramePaths, list_frame_ids
 from .dataset import DatasetCfgCommon
+from .view_sampler import ViewSampler
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ class DatasetReplica2dSeg(IterableDataset):
     near: float = 0.01
     far: float = 100.0
 
-    def __init__(self, cfg, stage, view_sampler):
+    def __init__(self, cfg, stage, view_sampler: ViewSampler):
         super().__init__()
         self.cfg = cfg
         self.stage = stage
@@ -123,6 +124,39 @@ class DatasetReplica2dSeg(IterableDataset):
         """Get number of frames available for a scene."""
         return len(self.frame_ids[scene])
 
+    def _scene_camera_tensors(
+        self, scene: str
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Load per-frame extrinsics and intrinsics for view sampling."""
+        frame_ids = self.frame_ids[scene]
+        h_target, w_target = self.cfg.input_image_shape
+        orig_h, orig_w = self.cfg.original_image_shape
+        extrinsics_list: list[np.ndarray] = []
+        intrinsics_list: list[np.ndarray] = []
+
+        for frame_id in frame_ids:
+            paths = FramePaths.from_frame_id(self.root / scene, frame_id)
+            if not paths.camera.is_file():
+                raise FileNotFoundError(f"Missing camera file {paths.camera}")
+            metadata = np.load(paths.camera)
+            pose = metadata["camera_pose"].astype(np.float32)
+            if np.any(np.isinf(pose)) or np.any(np.isnan(pose)):
+                raise ValueError(f"Invalid pose in {paths.camera}")
+
+            intrinsics = self.intrinsics.copy()
+            intrinsics[0, :] *= w_target / orig_w
+            intrinsics[1, :] *= h_target / orig_h
+            intrinsics[0, :] /= w_target
+            intrinsics[1, :] /= h_target
+
+            extrinsics_list.append(pose)
+            intrinsics_list.append(intrinsics)
+
+        return (
+            torch.from_numpy(np.stack(extrinsics_list, axis=0).astype(np.float32)),
+            torch.from_numpy(np.stack(intrinsics_list, axis=0).astype(np.float32)),
+        )
+
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
         scene_list = list(self.cfg.scenes)
@@ -140,10 +174,21 @@ class DatasetReplica2dSeg(IterableDataset):
         for scene in scene_list:
             frame_ids = self.frame_ids[scene]
             num_frames = len(frame_ids)
-            if num_frames < self.cfg.num_of_inputs + 1:
+            if num_frames < self.view_sampler.num_context_views + 1:
                 continue
 
-            context_indices, target_indices = self.sample_views(scene, num_frames)
+            try:
+                scene_extrinsics, scene_intrinsics = self._scene_camera_tensors(scene)
+                context_indices, target_indices, overlap = self.view_sampler.sample(
+                    scene,
+                    scene_extrinsics,
+                    scene_intrinsics,
+                )
+            except ValueError:
+                continue
+
+            context_indices = context_indices.tolist()
+            target_indices = target_indices.tolist()
 
             for target_idx in target_indices:
                 idxs = list(context_indices) + [target_idx]
@@ -224,7 +269,7 @@ class DatasetReplica2dSeg(IterableDataset):
                 images = torch.stack(images_list, dim=0)
                 labels = torch.cat(label_list, dim=0)
 
-                num_ctx = self.cfg.num_of_inputs
+                num_ctx = self.view_sampler.num_context_views
                 context_extrinsics = extrinsics[:num_ctx]
 
                 if self.cfg.make_baseline_1:
@@ -251,7 +296,7 @@ class DatasetReplica2dSeg(IterableDataset):
                         "near": self.get_bound("near", num_ctx) / scale,
                         "far": self.get_bound("far", num_ctx) / scale,
                         "index": torch.tensor(context_frame_ids, dtype=torch.int64),
-                        "overlap": 0,
+                        "overlap": overlap,
                     },
                     "target": {
                         "extrinsics": extrinsics[num_ctx:],
@@ -264,30 +309,6 @@ class DatasetReplica2dSeg(IterableDataset):
                     },
                     "scene": scene,
                 }
-
-    def sample_views(self, scene, num_frames):
-        """Sample context and target view indices for a scene."""
-        if self.stage == "test":
-            context_indices = [0, min(self.cfg.num_of_inputs, num_frames - 1)]
-            target_indices = list(range(num_frames))
-        else:
-            max_gap = min(num_frames - 1, 10)
-            left = torch.randint(0, num_frames - max_gap, size=()).item()
-            right = left + torch.randint(2, max_gap + 1, size=()).item()
-            right = min(right, num_frames - 1)
-            context_indices = [left, right]
-
-            num_targets = min(num_frames - 2, 1)
-            low = left + 1
-            high = right
-            if high <= low:
-                target_indices = [left]
-            else:
-                target_indices = [
-                    torch.randint(low, high, size=()).item() for _ in range(num_targets)
-                ]
-
-        return context_indices, target_indices
 
     def get_bound(self, bound, num_views):
         """Get near/far bound repeated for num_views."""

@@ -1,6 +1,7 @@
 defaults:
   - base_dataset
   - view_sampler: bounded
+  - optional view_sampler_dataset_specific_config@view_sampler: bounded_replica_2dseg
 
 name: replica_2dseg
 roots: [datasets/replica]
