@@ -2,8 +2,7 @@
 """Modal runner for prompted SAM training on the Replica volume.
 
 All training weights are read from the ``c3g-weights`` volume (mounted at
-``/weights``): ``sam_vit_h.pth``, ``gaussian_decoder.ckpt`` (preferred encoder
-init), or ``model.pt`` (VGGT fallback).
+``/weights``): ``sam_vit_h.pth`` and ``gaussian_decoder.ckpt`` (encoder init).
 
 Upload weights::
 

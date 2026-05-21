@@ -42,15 +42,13 @@ SAM_EVAL_OUTPUT_MOUNT = Path("/sam-eval-outputs")
 
 SAM_NUM_CHANNELS = 256
 DEFAULT_SAM_CHECKPOINT = WEIGHTS_MOUNT / "sam_vit_h.pth"
-DEFAULT_VGGT_WEIGHTS = WEIGHTS_MOUNT / "model.pt"
-DEFAULT_GAUSSIAN_WEIGHTS = WEIGHTS_MOUNT / "gaussian_decoder.ckpt"
+DEFAULT_ENCODER_WEIGHTS = WEIGHTS_MOUNT / "gaussian_decoder.ckpt"
 
 
 def resolve_encoder_pretrained_weights(override: str | Path | None = None) -> Path:
     """Return encoder init weights from the ``c3g-weights`` volume.
 
-    Prefers ``gaussian_decoder.ckpt``; falls back to ``model.pt`` when the
-    Gaussian decoder checkpoint is not on the volume.
+    Requires ``gaussian_decoder.ckpt`` (C3G Gaussian-decoder-trained encoder).
     """
     if override is not None:
         path = Path(override)
@@ -61,16 +59,13 @@ def resolve_encoder_pretrained_weights(override: str | Path | None = None) -> Pa
             )
         return path
 
-    if DEFAULT_GAUSSIAN_WEIGHTS.is_file():
-        return DEFAULT_GAUSSIAN_WEIGHTS
-    if DEFAULT_VGGT_WEIGHTS.is_file():
-        return DEFAULT_VGGT_WEIGHTS
+    if DEFAULT_ENCODER_WEIGHTS.is_file():
+        return DEFAULT_ENCODER_WEIGHTS
 
     raise FileNotFoundError(
         f"Missing encoder weights on `{WEIGHTS_VOLUME}` volume. "
-        f"Upload one of:\n"
-        f"  modal volume put {WEIGHTS_VOLUME} /path/to/gaussian_decoder.ckpt gaussian_decoder.ckpt\n"
-        f"  modal volume put {WEIGHTS_VOLUME} /path/to/model.pt model.pt"
+        f"Upload:\n"
+        f"  modal volume put {WEIGHTS_VOLUME} /path/to/gaussian_decoder.ckpt gaussian_decoder.ckpt"
     )
 
 

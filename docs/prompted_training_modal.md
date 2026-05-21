@@ -17,16 +17,13 @@ Upload checkpoints to the `c3g-weights` volume (mounted at `/weights` in trainin
 
 ```bash
 modal volume put c3g-weights /path/to/sam_vit_h.pth sam_vit_h.pth
-modal volume put c3g-weights /path/to/model.pt model.pt
-# Optional: faster convergence than VGGT backbone alone
 modal volume put c3g-weights /path/to/gaussian_decoder.ckpt gaussian_decoder.ckpt
 ```
 
 | File | Purpose |
 |------|---------|
 | `sam_vit_h.pth` | SAM ViT-H mask decoder (`train.sam_checkpoint`) |
-| `model.pt` | VGGT-1B encoder init (`model.encoder.pretrained_weights`) |
-| `gaussian_decoder.ckpt` | Optional Gaussian decoder init |
+| `gaussian_decoder.ckpt` | Encoder init (`model.encoder.pretrained_weights`) |
 
 ## Populate dataset volumes
 
@@ -114,8 +111,6 @@ python -m src.main \
     train.sam_checkpoint=/weights/sam_vit_h.pth \
     model.encoder.pretrained_weights=/weights/gaussian_decoder.ckpt
 ```
-
-Use `model.encoder.pretrained_weights=/weights/model.pt` if `gaussian_decoder.ckpt` is not on the volume.
 
 ### ScanNet
 
