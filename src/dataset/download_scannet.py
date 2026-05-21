@@ -86,7 +86,7 @@ def sens_uses_v1_release(scan_id: str) -> bool:
     """``.sens`` for scene0000_00–scene0706_00 is on v1; scene0707_00+ on v2."""
     return int(scan_id[5:9]) < 707
 
-FRAME_SKIP = 20
+FRAME_SKIP = 4
 IMAGE_SIZE = (480, 640)  # (height, width)
 FRAME_ID_WIDTH = 5
 VOLUME_NAME = "scannet"

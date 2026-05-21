@@ -45,7 +45,7 @@ SCENES: tuple[str, ...] = (
     "room1",
     "room2",
 )
-FRAME_SKIP = 20
+FRAME_SKIP = 4
 FRAME_ID_WIDTH = 5
 
 VOLUME_NAME = "replica"
