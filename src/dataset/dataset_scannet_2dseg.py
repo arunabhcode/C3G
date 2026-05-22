@@ -9,6 +9,10 @@ Expects data prepared by :mod:`download_scannet` on the Modal ``scannet`` volume
 Sampling, preprocessing, and batch layout match :mod:`dataset_replica_2dseg`
 and :mod:`dataset_replica_semseg`; only scene ids and on-disk paths differ.
 
+For C3G-SAM dual-resolution, each view also includes ``sam_image``: source RGB
+resized directly to the SAM encoder size (1024×1024), independent of
+``input_image_shape`` (252×252 for VGGT/splatting).
+
 Each yielded sample has ``view_sampler.num_context_views`` context frames (typically
 2) and ``view_sampler.num_target_views`` target frames. When the sampler returns
 more targets than that (e.g. test mode), the dataset subsamples without replacement;
@@ -32,6 +36,7 @@ from torch.utils.data import IterableDataset
 
 from ..misc.cam_utils import camera_normalization
 from ..misc.frame_layout import FramePaths, list_frame_ids
+from ..model.sam.constants import SAM_IMAGE_SIZE
 from .dataset import DatasetCfgCommon
 from .scannet_2dseg_splits import discover_scene_ids, scenes_for_stage
 from .view_sampler import ViewSampler
@@ -221,6 +226,7 @@ class DatasetScannet2dSeg(IterableDataset):
             extrinsics_list = []
             intrinsics_list = []
             images_list = []
+            sam_images_list: list[torch.Tensor] = []
             label_list = []
             valid = True
 
@@ -250,6 +256,11 @@ class DatasetScannet2dSeg(IterableDataset):
                 rgb_resized = cv2.resize(
                     rgb, (w_target, h_target), interpolation=cv2.INTER_LINEAR
                 )
+                rgb_sam = cv2.resize(
+                    rgb,
+                    (SAM_IMAGE_SIZE, SAM_IMAGE_SIZE),
+                    interpolation=cv2.INTER_LINEAR,
+                )
                 label_resized = cv2.resize(
                     label_map, (w_target, h_target), interpolation=cv2.INTER_NEAREST
                 )
@@ -276,6 +287,7 @@ class DatasetScannet2dSeg(IterableDataset):
                 extrinsics_list.append(pose)
                 intrinsics_list.append(intrinsics)
                 images_list.append(self.to_tensor(Image.fromarray(rgb_resized)))
+                sam_images_list.append(self.to_tensor(Image.fromarray(rgb_sam)))
                 label_list.append(
                     torch.from_numpy(label_resized.astype(np.int64))
                 )
@@ -291,6 +303,7 @@ class DatasetScannet2dSeg(IterableDataset):
             )
             images = torch.stack(images_list, dim=0)
             labels = torch.stack(label_list, dim=0)
+            sam_images = torch.stack(sam_images_list, dim=0)
 
             num_ctx = self.view_sampler.num_context_views
             context_extrinsics = extrinsics[:num_ctx]
@@ -310,26 +323,31 @@ class DatasetScannet2dSeg(IterableDataset):
             context_frame_ids = [int(frame_ids[i]) for i in context_indices]
             target_frame_ids = [int(frame_ids[i]) for i in sampled_target_indices]
 
+            context_views: dict = {
+                "extrinsics": extrinsics[:num_ctx],
+                "intrinsics": intrinsics[:num_ctx],
+                "image": images[:num_ctx],
+                "label": labels[:num_ctx],
+                "near": self.get_bound("near", num_ctx) / scale,
+                "far": self.get_bound("far", num_ctx) / scale,
+                "index": torch.tensor(context_frame_ids, dtype=torch.int64),
+                "overlap": overlap,
+            }
+            target_views: dict = {
+                "extrinsics": extrinsics[num_ctx:],
+                "intrinsics": intrinsics[num_ctx:],
+                "image": images[num_ctx:],
+                "label": labels[num_ctx:],
+                "near": self.get_bound("near", num_target_views) / scale,
+                "far": self.get_bound("far", num_target_views) / scale,
+                "index": torch.tensor(target_frame_ids, dtype=torch.int64),
+            }
+            context_views["sam_image"] = sam_images[:num_ctx]
+            target_views["sam_image"] = sam_images[num_ctx:]
+
             yield {
-                "context": {
-                    "extrinsics": extrinsics[:num_ctx],
-                    "intrinsics": intrinsics[:num_ctx],
-                    "image": images[:num_ctx],
-                    "label": labels[:num_ctx],
-                    "near": self.get_bound("near", num_ctx) / scale,
-                    "far": self.get_bound("far", num_ctx) / scale,
-                    "index": torch.tensor(context_frame_ids, dtype=torch.int64),
-                    "overlap": overlap,
-                },
-                "target": {
-                    "extrinsics": extrinsics[num_ctx:],
-                    "intrinsics": intrinsics[num_ctx:],
-                    "image": images[num_ctx:],
-                    "label": labels[num_ctx:],
-                    "near": self.get_bound("near", num_target_views) / scale,
-                    "far": self.get_bound("far", num_target_views) / scale,
-                    "index": torch.tensor(target_frame_ids, dtype=torch.int64),
-                },
+                "context": context_views,
+                "target": target_views,
                 "scene": scene,
             }
 

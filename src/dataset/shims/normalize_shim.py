@@ -28,4 +28,8 @@ def apply_normalize_shim(
     std: tuple[float, float, float] = (0.5, 0.5, 0.5),
 ) -> BatchedExample:
     batch["context"]["image"] = normalize_image(batch["context"]["image"], mean, std)
+    if "sam_image" in batch["context"]:
+        batch["context"]["sam_image"] = normalize_image(
+            batch["context"]["sam_image"], mean, std
+        )
     return batch

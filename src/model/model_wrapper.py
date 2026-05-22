@@ -62,6 +62,13 @@ from ..loss.loss_segmentation_prompted import (
     LossSegmentationPromptedCfg,
     LossSegmentationPromptedCfgWrapper,
 )
+from .sam.constants import SAM_IMAGE_SIZE
+
+_REPLICA_SAM_DUAL_RES_MSG = (
+    "Direct SAM upsampling to 1024×1024 is only implemented for ScanNet "
+    "(batches must include context/target 'sam_image' from scannet_2dseg). "
+    "Replica dual-resolution SAM has not been implemented yet."
+)
 
 
 @dataclass
@@ -500,7 +507,10 @@ class ModelWrapper(LightningModule):
         visualization_dump = {}
 
         context_feature = (
-            self.forward_foundation_model(batch["context"]["image"])
+            self.forward_foundation_model(
+                batch["context"]["image"],
+                sam_image=batch["context"].get("sam_image"),
+            )
             if self.encoder.cfg.feature_dim
             else None
         )
@@ -576,6 +586,7 @@ class ModelWrapper(LightningModule):
                     (batch["context"]["image"], batch["target"]["image"] * 2 - 1), dim=1
                 ),
                 interpolate=False,
+                sam_image=self._sam_images_context_and_target(batch),
             )
             feature = torch.cat(
                 (feature[:, CV:], feature[:, :CV]), dim=1
@@ -672,9 +683,24 @@ class ModelWrapper(LightningModule):
 
         return total_loss
 
+    @staticmethod
+    def _sam_images_context_and_target(batch: BatchedExample) -> Tensor | None:
+        """Context (normalized) + target ([0,1] -> [-1,1]) SAM tensors, or None."""
+        ctx_sam = batch["context"].get("sam_image")
+        if ctx_sam is None:
+            return None
+        tgt_sam = batch["target"].get("sam_image")
+        if tgt_sam is None:
+            return ctx_sam
+        return torch.cat((ctx_sam, tgt_sam * 2 - 1), dim=1)
+
     @torch.no_grad()
     def forward_foundation_model(
-        self, input_image, interpolate=True, vggt_tracking=False
+        self,
+        input_image,
+        interpolate=True,
+        vggt_tracking=False,
+        sam_image: Tensor | None = None,
     ):
         B, V, C, H, W = input_image.shape  ## [-1~1]
 
@@ -718,12 +744,17 @@ class ModelWrapper(LightningModule):
                     )
 
             elif "sam" in self.train_cfg.reproj_model:
-                sam_input = F.interpolate(
-                    input_image.reshape(B * V, C, H, W),
-                    size=(1024, 1024),
-                    mode="bilinear",
-                    align_corners=False,
-                )
+                if sam_image is None:
+                    raise NotImplementedError(_REPLICA_SAM_DUAL_RES_MSG)
+                _, _, H_sam, W_sam = sam_image.shape
+                sam_input = sam_image.reshape(B * V, C, H_sam, W_sam)
+                if H_sam != SAM_IMAGE_SIZE or W_sam != SAM_IMAGE_SIZE:
+                    sam_input = F.interpolate(
+                        sam_input,
+                        size=(SAM_IMAGE_SIZE, SAM_IMAGE_SIZE),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
                 context_feature = self.sam_encoder(sam_input)
                 context_feature = context_feature.reshape(B, V, 256, 64, 64)
 
@@ -862,7 +893,10 @@ class ModelWrapper(LightningModule):
 
         # Render Gaussians.
         context_feature = (
-            self.forward_foundation_model(batch["context"]["image"])
+            self.forward_foundation_model(
+                batch["context"]["image"],
+                sam_image=batch["context"].get("sam_image"),
+            )
             if self.encoder.cfg.feature_dim
             else None
         )
@@ -998,8 +1032,11 @@ class ModelWrapper(LightningModule):
                 else:
                     target_image = batch["target"]["image"]
 
+                tgt_sam = batch["target"].get("sam_image")
                 foundation_feature = self.forward_foundation_model(
-                    (target_image * 2 - 1), interpolate=False
+                    (target_image * 2 - 1),
+                    interpolate=False,
+                    sam_image=(tgt_sam * 2 - 1) if tgt_sam is not None else None,
                 )
 
                 save_dir = path / scene / "seg"
@@ -1407,7 +1444,10 @@ class ModelWrapper(LightningModule):
         visualization_dump = {}
 
         context_feature = (
-            self.forward_foundation_model(batch["context"]["image"])
+            self.forward_foundation_model(
+                batch["context"]["image"],
+                sam_image=batch["context"].get("sam_image"),
+            )
             if self.encoder.cfg.feature_dim
             else None
         )
@@ -1544,10 +1584,12 @@ class ModelWrapper(LightningModule):
             foundation_feature = self.forward_foundation_model(
                 torch.cat(
                     (batch["context"]["image"], batch["target"]["image"] * 2 - 1), dim=1
-                )
+                ),
+                sam_image=self._sam_images_context_and_target(batch),
             )
             context_foundation_features = self.forward_foundation_model(
-                batch["context"]["image"]
+                batch["context"]["image"],
+                sam_image=batch["context"].get("sam_image"),
             )
 
             pca_images, pca_vggt_images = [], []
@@ -1736,7 +1778,10 @@ class ModelWrapper(LightningModule):
     ) -> None:
         # Render probabilistic estimate of scene.
         if self.encoder.cfg.feature_dim:
-            context_feature = self.forward_foundation_model(batch["context"]["image"])
+            context_feature = self.forward_foundation_model(
+                batch["context"]["image"],
+                sam_image=batch["context"].get("sam_image"),
+            )
         else:
             context_feature = None
 
