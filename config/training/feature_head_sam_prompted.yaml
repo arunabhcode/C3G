@@ -38,7 +38,7 @@ optimizer:
 
 data_loader:
   train:
-    batch_size: 4
+    batch_size: 2
 
 train:
   context_view_loss: true
@@ -56,7 +56,7 @@ train:
 trainer:
   max_steps: 200000 #5001
   val_check_interval: 2000
-  accumulate_grad_batches: 1
+  accumulate_grad_batches: 4
 
 checkpointing:
   every_n_train_steps: 5000

@@ -206,7 +206,9 @@ Full vanilla SAM eval (every frame; masks on ``sam-eval-outputs``):
 modal run src/inference/modal_vanilla_sam.py::main --dataset replica --run-name vanilla_sam_replica --wait
 ```
 
-Use `modal run --detach …` for full training jobs. Shared volume paths and Hydra overrides live in `src/inference/modal_sam_common.py`.
+Full training spawns on Modal by default (`.spawn()`); the local process returns with a `call_id` and does not block on `.remote()`. Use `--wait` to block until the job finishes. `modal run --detach` only disconnects log streaming—it does not set an entrypoint flag—so blocking behavior is controlled by `--wait`, not by the CLI `--detach` flag alone.
+
+Shared volume paths and Hydra overrides live in `src/inference/modal_sam_common.py`.
 
 ### Key training parameters
 

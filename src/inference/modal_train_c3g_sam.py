@@ -14,7 +14,7 @@ Smoke test (one step, first scene; detached by default)::
     modal run src/inference/modal_train_c3g_sam.py::smoke --dataset replica
     modal run src/inference/modal_train_c3g_sam.py::smoke --dataset scannet --wait
 
-Full training::
+Full training (spawn on Modal by default; use ``--wait`` to block locally)::
 
     modal run src/inference/modal_train_c3g_sam.py --run-name sam_prompted_replica --dataset replica
     modal run --detach src/inference/modal_train_c3g_sam.py --run-name sam_prompted_scannet --dataset scannet
@@ -205,7 +205,7 @@ def main(
     gaussian_weights: str | None = None,
     sam_checkpoint: str | None = None,
     detach: bool | None = None,
-    wait: bool = True,
+    wait: bool = False,
 ) -> None:
     """Full prompted SAM training on Replica or ScanNet."""
     if dataset not in DATASET_SPECS:
