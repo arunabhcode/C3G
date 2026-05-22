@@ -33,12 +33,10 @@ from torch.utils.data import IterableDataset
 from ..misc.cam_utils import camera_normalization
 from ..misc.frame_layout import FramePaths, list_frame_ids
 from .dataset import DatasetCfgCommon
+from .scannet_2dseg_splits import discover_scene_ids, scenes_for_stage
 from .view_sampler import ViewSampler
 
 logger = logging.getLogger(__name__)
-
-# 15 scenes with 2D semantic labels (scene0697_00 … scene0711_00).
-SCENES = [f"scene{i:04d}_00" for i in range(697, 712)]
 
 
 @dataclass
@@ -46,6 +44,8 @@ class Scannet2dSegCfg(DatasetCfgCommon):
     name: str
     roots: list[Path]
     scenes: list[str]
+    val_scene_count: int
+    test_scene_count: int
     baseline_min: float
     baseline_max: float
     max_fov: float
@@ -81,14 +81,36 @@ class DatasetScannet2dSeg(IterableDataset):
             raise FileNotFoundError(f"Dataset root does not exist: {root}")
 
         self.root = root
+        if cfg.overfit_to_scene is not None:
+            self.scenes = [cfg.overfit_to_scene]
+        elif cfg.scenes:
+            all_scenes = cfg.scenes
+            self.scenes = scenes_for_stage(
+                stage,
+                scene_ids=all_scenes,
+                num_val=cfg.val_scene_count,
+                num_test=cfg.test_scene_count,
+            )
+        else:
+            all_scenes = discover_scene_ids(root)
+            self.scenes = scenes_for_stage(
+                stage,
+                scene_ids=all_scenes,
+                num_val=cfg.val_scene_count,
+                num_test=cfg.test_scene_count,
+            )
+        if not self.scenes:
+            raise FileNotFoundError(
+                f"No ScanNet scenes for stage={stage!r} under {root}"
+            )
         self.intrinsics = self.load_intrinsics()
         self.frame_ids = {
-            scene: list_frame_ids(self.root / scene) for scene in cfg.scenes
+            scene: list_frame_ids(self.root / scene) for scene in self.scenes
         }
 
     def load_intrinsics(self):
         """Read shared intrinsics from the first available frame camera file."""
-        for scene in self.cfg.scenes:
+        for scene in self.scenes:
             frame_ids = list_frame_ids(self.root / scene)
             if not frame_ids:
                 continue
@@ -99,7 +121,7 @@ class DatasetScannet2dSeg(IterableDataset):
             return metadata["camera_intrinsics"].astype(np.float32)
 
         raise FileNotFoundError(
-            f"No camera files found under {self.root} for scenes {self.cfg.scenes}"
+            f"No camera files found under {self.root} for scenes {self.scenes}"
         )
 
     def decompose_labels(self, label_map):
@@ -157,7 +179,7 @@ class DatasetScannet2dSeg(IterableDataset):
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
-        scene_list = list(self.cfg.scenes)
+        scene_list = list(self.scenes)
 
         if self.stage == "test" and worker_info is not None:
             scene_list = [

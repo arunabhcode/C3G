@@ -38,6 +38,7 @@ class DataLoaderStageCfg:
     num_workers: int
     persistent_workers: bool
     seed: int | None
+    limit_batches: int | None = None
 
 
 @dataclass
@@ -112,7 +113,10 @@ class DataModule(LightningDataModule):
             dataset = self.dataset_shim(dataset, "val")
             data_loaders.append(
                 DataLoader(
-                    ValidationWrapper(dataset, 1),
+                    ValidationWrapper(
+                        dataset,
+                        self.data_loader_cfg.val.limit_batches or 1,
+                    ),
                     self.data_loader_cfg.val.batch_size,
                     num_workers=self.data_loader_cfg.val.num_workers,
                     generator=self.get_generator(self.data_loader_cfg.val),

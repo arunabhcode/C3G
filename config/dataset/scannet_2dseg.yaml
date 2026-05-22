@@ -5,22 +5,10 @@ defaults:
 
 name: scannet_2dseg
 roots: [datasets/scannet]
-scenes:
-  - scene0697_00
-  - scene0698_00
-  - scene0699_00
-  - scene0700_00
-  - scene0701_00
-  - scene0702_00
-  - scene0703_00
-  - scene0704_00
-  - scene0705_00
-  - scene0706_00
-  - scene0707_00
-  - scene0708_00
-  - scene0709_00
-  - scene0710_00
-  - scene0711_00
+# Empty list: discover all scenes on disk and split by scan number (see scannet_2dseg_splits).
+scenes: []
+val_scene_count: 8
+test_scene_count: 24
 make_baseline_1: true
 augment: true
 

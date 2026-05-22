@@ -48,7 +48,7 @@ Point training configs at `dataset.replica_2dseg.roots=[/replica]` (or the mount
 
 ### ScanNet (`scannet` volume → `/scannet`)
 
-Fifteen labeled test scenes: `scene0697_00` … `scene0711_00`. Requires accepting the ScanNet terms of use.
+The Modal ``scannet`` volume holds 807 prepared scenes (`scene0000_00` … `scene0806_00`). Training uses a fixed split by scan number (see `src/dataset/scannet_2dseg_splits.py` and `assets/scannet_2dseg_scene_splits.json`): **775 train** (`scene0000_00`–`scene0774_00`), **8 val** (`scene0775_00`–`scene0782_00`), **24 test** (`scene0783_00`–`scene0806_00`). W&B `val/*` metrics run on the val scenes only; test is held out for a separate eval script. Requires accepting the ScanNet terms of use.
 
 ```bash
 modal run src/dataset/download_scannet.py --accept-tos

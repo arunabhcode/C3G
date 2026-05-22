@@ -31,6 +31,8 @@ data_loader:
     persistent_workers: true
     batch_size: 1
     seed: 3456
+    # One batch per val scene when using ScanNet 2dseg (8 val scenes).
+    limit_batches: 8
 
 optimizer:
   lr: 1.5e-4

@@ -21,7 +21,9 @@ REPLICA_2DSEG_SCENES = [
     "room1",
     "room2",
 ]
-SCANNET_2DSEG_SCENES = [f"scene{i:04d}_00" for i in range(697, 712)]
+# Train split: scene0000_00 … scene0774_00 (775 scenes). Val then test = last 32 on volume.
+# See src/dataset/scannet_2dseg_splits.py (avoid importing src.dataset here — pulls torch).
+SCANNET_2DSEG_SCENES = [f"scene{i:04d}_00" for i in range(807 - 8 - 24)]
 
 DatasetName = Literal["replica", "scannet"]
 TrainingConfigName = Literal["feature_head_sam_prompted", "feature_head_sam"]
