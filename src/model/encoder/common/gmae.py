@@ -186,3 +186,13 @@ class InstillTransformer(nn.Module):
             x = ff1(x) + x
             context_feature = ff2(context_feature) + context_feature
         return self.norm(x), self.y_norm(context_feature)
+
+
+def freeze_instill_attention_qk(instill_transformer: InstillTransformer) -> None:
+    """Freeze Q/K rows of ``to_qkv``; keep V and ``to_anotherv`` trainable."""
+    for module_list in instill_transformer.layers:
+        attn = module_list[0]
+        if not isinstance(attn, InstillAttention):
+            continue
+        inner_dim = attn.to_qkv.out_features // 3
+        attn.to_qkv.weight[: inner_dim * 2].requires_grad_(False)

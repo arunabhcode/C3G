@@ -26,6 +26,8 @@ model:
     pretrained_weights: "./pretrained_weights/model.pt"
     init_points: one_point
     gaussian_feature_dim: 256
+    freeze_backbone: true
+    freeze_instill_qk: true
   decoder:
     make_scale_invariant: true
     decrease_lpf_step: 1000
@@ -38,7 +40,7 @@ optimizer:
 
 data_loader:
   train:
-    batch_size: 2
+    batch_size: 1
 
 train:
   context_view_loss: true

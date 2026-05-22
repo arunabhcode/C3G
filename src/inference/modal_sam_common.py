@@ -288,6 +288,13 @@ def build_sam_train_overrides(
         overrides.append(f"{spec['overfit_key']}={smoke_scene}")
     if resume:
         overrides.append(f"checkpointing.load={resume}")
+    if training_config == TRAINING_CONFIG_PROMPTED:
+        overrides.extend(
+            [
+                "model.encoder.freeze_backbone=true",
+                "model.encoder.freeze_instill_qk=true",
+            ]
+        )
     return overrides
 
 

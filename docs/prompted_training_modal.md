@@ -221,6 +221,8 @@ Shared volume paths and Hydra overrides live in `src/inference/modal_sam_common.
 | `train.sam_model_variant` | `sam_vit_h` | SAM variant |
 | `train.use_lora` | `false` | LoRA on SAM decoder |
 | `train.lora_rank` | `4` | LoRA rank (if enabled) |
+| `model.encoder.freeze_backbone` | `true` | Freeze VGGT aggregator (Modal + prompted config) |
+| `model.encoder.freeze_instill_qk` | `true` | Freeze Instill `to_qkv` Q/K rows; V + `to_anotherv` train |
 
 ## Evaluation (segment-everything mode)
 

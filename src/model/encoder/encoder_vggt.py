@@ -20,7 +20,11 @@ from .common.gaussian_adapter import (
     UnifiedGaussianAdapter,
 )
 from .encoder import Encoder
-from .common.gmae import Transformer, InstillTransformer
+from .common.gmae import (
+    Transformer,
+    InstillTransformer,
+    freeze_instill_attention_qk,
+)
 from .backbone.croco.misc import fill_default_args, freeze_all_params
 
 inf = float("inf")
@@ -59,6 +63,7 @@ class EncoderVGGTCfg:
     pretrained_weights: str = ""
     pose_free: bool = True
     freeze_backbone: bool = False
+    freeze_instill_qk: bool = False
     decoder_depth: int = 2
     gaussians_per_token: int = 1
     gaussian_feature_dim: int = 0
@@ -115,6 +120,8 @@ class EncoderVGGT(Encoder[EncoderVGGTCfg]):
                 mlp_dim=transformer_dim * 2,
                 cfg=cfg,
             )
+            if cfg.freeze_instill_qk:
+                freeze_instill_attention_qk(self.gmae_decoder)
 
             if self.cfg.different_learnable_tokens:
                 self.gaussian_tokens_feature = nn.Parameter(
