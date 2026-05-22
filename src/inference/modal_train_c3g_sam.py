@@ -22,6 +22,7 @@ Full training::
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import sys
@@ -51,6 +52,8 @@ from src.inference.modal_sam_common import (
 
 APP_NAME = "c3g-sam-prompted-simple"
 WORKSPACE = C3G_MODAL_WORKSPACE
+# Create before online runs: modal secret create wandb WANDB_API_KEY=<your-key>
+WANDB_SECRET = modal.Secret.from_name("wandb")
 
 app = modal.App(APP_NAME)
 weights_volume = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
@@ -72,6 +75,7 @@ def _validate_dataset_root(dataset: DatasetName, dataset_root: str) -> None:
     image=build_c3g_modal_image(),
     gpu="A100-80GB",
     timeout=60 * 60 * 4,
+    secrets=[WANDB_SECRET],
     volumes={
         str(WEIGHTS_MOUNT): weights_volume,
         str(REPLICA_MOUNT): replica_volume,
@@ -90,6 +94,14 @@ def train_prompted_sam(
     sam_checkpoint: str | None = None,
 ) -> str:
     """Run prompted SAM training on a prepared Replica or ScanNet Modal volume."""
+    if wandb_mode == "online" and not os.environ.get("WANDB_API_KEY"):
+        raise RuntimeError(
+            "wandb.mode=online requires a Modal secret named 'wandb' with WANDB_API_KEY. "
+            "Create it with: modal secret create wandb WANDB_API_KEY=<your-key> "
+            "(get a key at https://wandb.ai/authorize). "
+            "Or rerun with --wandb-mode disabled."
+        )
+
     encoder_weights, sam_path = resolve_training_weights(
         gaussian_weights=gaussian_weights,
         sam_checkpoint=sam_checkpoint,

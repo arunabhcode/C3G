@@ -1,7 +1,7 @@
 # @package _global_
 
 defaults:
-  - /dataset@_group_.replica_semseg: replica_semseg
+  # Dataset is selected at launch, e.g. +dataset@_group_.scannet_2dseg=scannet_2dseg
   - override /model/encoder: noposplat
   - override /model/encoder/backbone: croco
   - override /loss: [mse, lpips]
@@ -30,11 +30,6 @@ model:
     make_scale_invariant: true
     decrease_lpf_step: 1000
     feature_detach: false
-
-dataset:
-  replica_semseg:
-    view_sampler:
-      warm_up_steps: 37500
 
 optimizer:
   lr: 1e-4

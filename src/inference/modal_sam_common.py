@@ -94,10 +94,18 @@ def resolve_training_weights(
         resolve_sam_checkpoint(sam_checkpoint),
     )
 
+def dataset_group_hydra_overrides(
+    hydra_add: str,
+    training_config: TrainingConfigName,
+) -> list[str]:
+    """Add the 2dseg dataset config group (training preset has no dataset default)."""
+    _ = training_config
+    return [f"+dataset@_group_.{hydra_add}={hydra_add}"]
+
+
 DATASET_SPECS: dict[DatasetName, dict[str, str | list[str]]] = {
     "replica": {
         "hydra_add": "replica_2dseg",
-        "hydra_override_group": "dataset@dataset.replica_semseg",
         "dataset_cfg_key": "dataset.replica_2dseg",
         "roots_key": "dataset.replica_2dseg.roots",
         "overfit_key": "dataset.replica_2dseg.overfit_to_scene",
@@ -109,7 +117,6 @@ DATASET_SPECS: dict[DatasetName, dict[str, str | list[str]]] = {
     },
     "scannet": {
         "hydra_add": "scannet_2dseg",
-        "hydra_override_group": "dataset@dataset.scannet_semseg",
         "dataset_cfg_key": "dataset.scannet_2dseg",
         "roots_key": "dataset.scannet_2dseg.roots",
         "overfit_key": "dataset.scannet_2dseg.overfit_to_scene",
@@ -241,7 +248,7 @@ def build_sam_train_overrides(
     run_dir = output_mount / "runs" / run_name
     overrides = [
         f"+training={training_config}",
-        f"{spec['hydra_override_group']}={spec['hydra_add']}",
+        *dataset_group_hydra_overrides(spec["hydra_add"], training_config),
         f"wandb.mode={wandb_mode}",
         f"wandb.name={run_name}",
         f"hydra.run.dir={run_dir}",
@@ -332,7 +339,7 @@ def build_prompted_test_overrides(
     pred_root = output_mount / "runs"
     overrides = [
         f"+training={training_config}",
-        f"{spec['hydra_override_group']}={spec['hydra_add']}",
+        *dataset_group_hydra_overrides(spec["hydra_add"], training_config),
         "mode=test",
         f"wandb.mode={wandb_mode}",
         f"wandb.name={run_name}",

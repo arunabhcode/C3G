@@ -101,8 +101,6 @@ Use `+training=feature_head_sam_prompted` with the `replica_2dseg` or `scannet_2
 ```bash
 python -m src.main \
     +training=feature_head_sam_prompted \
-    ~dataset@_group_.replica \
-    ~dataset@_group_.replica_semseg \
     +dataset@_group_.replica_2dseg=replica_2dseg \
     wandb.mode=online \
     wandb.name=sam_prompted_replica \
@@ -117,8 +115,6 @@ python -m src.main \
 ```bash
 python -m src.main \
     +training=feature_head_sam_prompted \
-    ~dataset@_group_.replica \
-    ~dataset@_group_.replica_semseg \
     +dataset@_group_.scannet_2dseg=scannet_2dseg \
     wandb.mode=online \
     wandb.name=sam_prompted_scannet \
@@ -136,10 +132,20 @@ python -m src.main \
 train.prompt_strategy=random_point
 ```
 
+**Weights & Biases on Modal** (`--wandb-mode online`):
+
+The training container needs `WANDB_API_KEY`. Create a Modal secret once (API key from [wandb.ai/authorize](https://wandb.ai/authorize)):
+
+```bash
+modal secret create wandb WANDB_API_KEY=<your-key>
+```
+
+`wandb login` on your laptop does not apply inside Modal.
+
 **Disable Weights & Biases:**
 
 ```bash
-wandb.mode=disabled
+--wandb-mode disabled
 ```
 
 **Resume** from a checkpoint on the output volume:
@@ -211,8 +217,6 @@ Evaluation uses grid prompts regardless of training `prompt_mode`. Example for R
 ```bash
 python -m src.main \
     +training=feature_head_sam_prompted \
-    ~dataset@_group_.replica \
-    ~dataset@_group_.replica_semseg \
     +dataset@_group_.replica_2dseg=replica_2dseg \
     mode=test \
     wandb.mode=online \

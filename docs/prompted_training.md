@@ -63,16 +63,19 @@ Scenes used: `office0`, `office1`, `office2`, `office3`, `office4`, `room0`, `ro
 Run prompted-mode training:
 
 ```bash
-uv run python -m src.main +training=feature_head_sam_prompted wandb.mode=online wandb.name="sam_prompted"
+uv run python -m src.main +training=feature_head_sam_prompted \
+    +dataset@_group_.replica_2dseg=replica_2dseg \
+    wandb.mode=online wandb.name="sam_prompted"
 ```
 
 To override the dataset root:
 
 ```bash
 uv run python -m src.main +training=feature_head_sam_prompted \
+    +dataset@_group_.replica_2dseg=replica_2dseg \
     wandb.mode=online \
     wandb.name="sam_prompted" \
-    dataset.replica_semseg.roots="[/path/to/replica_semseg]"
+    dataset.replica_2dseg.roots="[/path/to/replica]"
 ```
 
 To use random-point prompts instead of centroid:
