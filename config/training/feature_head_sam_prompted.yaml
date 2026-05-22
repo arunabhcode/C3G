@@ -43,7 +43,7 @@ optimizer:
 
 data_loader:
   train:
-    batch_size: 2
+    batch_size: 8
 
 train:
   context_view_loss: true
@@ -59,8 +59,8 @@ train:
   lora_rank: 4
 
 trainer:
-  max_steps: 5001
-  val_check_interval: 1000
+  max_steps: 200000 #5001
+  val_check_interval: 2000
   accumulate_grad_batches: 1
 
 checkpointing:
