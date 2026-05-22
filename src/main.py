@@ -59,7 +59,7 @@ def train(cfg_dict: DictConfig):
         logger = WandbLogger(
             project=cfg_dict.wandb.project,
             mode=cfg_dict.wandb.mode,
-            name=f"{cfg_dict.wandb.name} ({output_dir.parent.name}/{output_dir.name})",
+            name=cfg_dict.wandb.name,
             tags=cfg_dict.wandb.get("tags", None),
             log_model=False,
             save_dir=output_dir,

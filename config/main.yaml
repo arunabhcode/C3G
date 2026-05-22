@@ -27,7 +27,7 @@ data_loader:
     batch_size: 1
     seed: 2345
   val:
-    num_workers: 1
+    num_workers: 4
     persistent_workers: true
     batch_size: 1
     seed: 3456

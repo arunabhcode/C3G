@@ -228,14 +228,15 @@ def build_sam_train_overrides(
     wandb_mode: str,
     gaussian_weights: str | Path | None = None,
     sam_checkpoint: str | Path | None = None,
-    val_interval: int,
-    batch_size: int,
+    val_interval: int | None = None,
+    batch_size: int | None = None,
     training_config: TrainingConfigName = TRAINING_CONFIG_PROMPTED,
     prompt_strategy: str | None = None,
     prompted_seg_loss_weight: float | None = None,
     min_object_pixels: int | None = None,
-    max_distance_between_context_views: int = 6,
-    min_distance_between_context_views: int = 1,
+    max_distance_between_context_views: int | None = None,
+    min_distance_between_context_views: int | None = None,
+    view_sampler_warm_up_steps: int | None = None,
     resume: str | None,
     output_mount: Path = OUTPUT_MOUNT,
     smoke_scene: str | None = None,
@@ -250,18 +251,30 @@ def build_sam_train_overrides(
         f"+training={training_config}",
         *dataset_group_hydra_overrides(spec["hydra_add"], training_config),
         f"wandb.mode={wandb_mode}",
+        f"wandb.project={run_name}",
         f"wandb.name={run_name}",
         f"hydra.run.dir={run_dir}",
         f"trainer.max_steps={max_steps}",
-        f"trainer.val_check_interval={val_interval}",
-        f"data_loader.train.batch_size={batch_size}",
         f"model.encoder.pretrained_weights={encoder_weights}",
         f"train.sam_checkpoint={sam_path}",
         f"{spec['roots_key']}=[{dataset_root}]",
-        f"{spec['dataset_cfg_key']}.view_sampler.max_distance_between_context_views={max_distance_between_context_views}",
-        f"{spec['dataset_cfg_key']}.view_sampler.min_distance_between_context_views={min_distance_between_context_views}",
-        f"{spec['dataset_cfg_key']}.view_sampler.warm_up_steps=0",
     ]
+    if val_interval is not None:
+        overrides.append(f"trainer.val_check_interval={val_interval}")
+    if batch_size is not None:
+        overrides.append(f"data_loader.train.batch_size={batch_size}")
+    if max_distance_between_context_views is not None:
+        overrides.append(
+            f"{spec['dataset_cfg_key']}.view_sampler.max_distance_between_context_views={max_distance_between_context_views}"
+        )
+    if min_distance_between_context_views is not None:
+        overrides.append(
+            f"{spec['dataset_cfg_key']}.view_sampler.min_distance_between_context_views={min_distance_between_context_views}"
+        )
+    if view_sampler_warm_up_steps is not None:
+        overrides.append(
+            f"{spec['dataset_cfg_key']}.view_sampler.warm_up_steps={view_sampler_warm_up_steps}"
+        )
     if training_config == TRAINING_CONFIG_PROMPTED:
         if prompt_strategy is not None:
             overrides.append(f"train.prompt_strategy={prompt_strategy}")
@@ -287,13 +300,14 @@ def build_prompted_train_overrides(
     wandb_mode: str,
     gaussian_weights: str | Path | None = None,
     sam_checkpoint: str | Path | None = None,
-    val_interval: int,
-    batch_size: int,
-    prompt_strategy: str,
-    prompted_seg_loss_weight: float,
-    min_object_pixels: int,
-    max_distance_between_context_views: int = 6,
-    min_distance_between_context_views: int = 1,
+    val_interval: int | None = None,
+    batch_size: int | None = None,
+    prompt_strategy: str | None = None,
+    prompted_seg_loss_weight: float | None = None,
+    min_object_pixels: int | None = None,
+    max_distance_between_context_views: int | None = None,
+    min_distance_between_context_views: int | None = None,
+    view_sampler_warm_up_steps: int | None = None,
     resume: str | None,
     output_mount: Path = OUTPUT_MOUNT,
     smoke_scene: str | None = None,
@@ -315,6 +329,7 @@ def build_prompted_train_overrides(
         min_object_pixels=min_object_pixels,
         max_distance_between_context_views=max_distance_between_context_views,
         min_distance_between_context_views=min_distance_between_context_views,
+        view_sampler_warm_up_steps=view_sampler_warm_up_steps,
         resume=resume,
         output_mount=output_mount,
         smoke_scene=smoke_scene,
@@ -342,6 +357,7 @@ def build_prompted_test_overrides(
         *dataset_group_hydra_overrides(spec["hydra_add"], training_config),
         "mode=test",
         f"wandb.mode={wandb_mode}",
+        f"wandb.project={run_name}",
         f"wandb.name={run_name}",
         f"hydra.run.dir={run_dir}",
         f"test.output_path={pred_root}",

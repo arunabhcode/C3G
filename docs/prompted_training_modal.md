@@ -166,6 +166,16 @@ modal run src/inference/modal_train_c3g_sam.py \
     --run-name sam_prompted_scannet --dataset scannet
 ```
 
+**Training hyperparameters:** By default, Modal uses values from `config/training/feature_head_sam_prompted.yaml` (e.g. `data_loader.train.batch_size: 4`, `trainer.val_check_interval: 2000`). Override only when needed:
+
+```bash
+--batch-size 4              # default: use training config (4)
+--val-check-interval 2000   # default: use training config (2000)
+--max-steps 5001            # default: 5001 (config has 200000 for long local runs)
+```
+
+Modal always sets: dataset roots, weight paths on `/weights`, W&B project/name from `--run-name`, and `hydra.run.dir=/outputs/runs/<run-name>`. Smoke runs force `batch_size=1` and skip checkpointing.
+
 Smoke tests run **detached on Modal GPU** by default (no local GPU, dataset, or blocking wait). Use `--wait` to block until completion.
 
 Training smoke (one step on the first indexed scene; no checkpoint):

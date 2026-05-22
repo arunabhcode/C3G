@@ -746,8 +746,8 @@ class ModelWrapper(LightningModule):
             elif "sam" in self.train_cfg.reproj_model:
                 if sam_image is None:
                     raise NotImplementedError(_REPLICA_SAM_DUAL_RES_MSG)
-                _, _, H_sam, W_sam = sam_image.shape
-                sam_input = sam_image.reshape(B * V, C, H_sam, W_sam)
+                _, _, _, H_sam, W_sam = sam_image.shape
+                sam_input = sam_image.reshape(B * V, -1, H_sam, W_sam)
                 if H_sam != SAM_IMAGE_SIZE or W_sam != SAM_IMAGE_SIZE:
                     sam_input = F.interpolate(
                         sam_input,

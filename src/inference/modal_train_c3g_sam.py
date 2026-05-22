@@ -18,6 +18,7 @@ Full training::
 
     modal run src/inference/modal_train_c3g_sam.py --run-name sam_prompted_replica --dataset replica
     modal run --detach src/inference/modal_train_c3g_sam.py --run-name sam_prompted_scannet --dataset scannet
+    modal run src/inference/modal_train_c3g_sam.py --run-name my_run --dataset scannet --batch-size 4
 """
 
 from __future__ import annotations
@@ -92,6 +93,8 @@ def train_prompted_sam(
     wandb_mode: str = "disabled",
     gaussian_weights: str | None = None,
     sam_checkpoint: str | None = None,
+    batch_size: int | None = None,
+    val_check_interval: int | None = None,
 ) -> str:
     """Run prompted SAM training on a prepared Replica or ScanNet Modal volume."""
     if wandb_mode == "online" and not os.environ.get("WANDB_API_KEY"):
@@ -124,11 +127,8 @@ def train_prompted_sam(
         wandb_mode=wandb_mode,
         gaussian_weights=encoder_weights,
         sam_checkpoint=sam_path,
-        val_interval=10_000 if smoke else 1000,
-        batch_size=1 if smoke else 2,
-        prompt_strategy="centroid",
-        prompted_seg_loss_weight=1.0,
-        min_object_pixels=16,
+        val_interval=10_000 if smoke else val_check_interval,
+        batch_size=1 if smoke else batch_size,
         resume=None,
         smoke_scene=smoke_scene,
     )
@@ -159,6 +159,8 @@ def _dispatch_train(
     wandb_mode: str,
     gaussian_weights: str | None,
     sam_checkpoint: str | None,
+    batch_size: int | None,
+    val_check_interval: int | None,
     detach: bool,
 ) -> None:
     from src.misc.modal_run import dispatch_remote
@@ -174,6 +176,8 @@ def _dispatch_train(
         wandb_mode=wandb_mode,
         gaussian_weights=gaussian_weights,
         sam_checkpoint=sam_checkpoint,
+        batch_size=batch_size,
+        val_check_interval=val_check_interval,
         detach=detach,
         job_name=f"C3G SAM {mode_label} ({run_name}, {dataset})",
         app_name=APP_NAME,
@@ -194,6 +198,8 @@ def main(
     run_name: str | None = None,
     dataset: DatasetName = "replica",
     max_steps: int = 5001,
+    batch_size: int | None = None,
+    val_check_interval: int | None = None,
     dataset_root: str | None = None,
     wandb_mode: str = "disabled",
     gaussian_weights: str | None = None,
@@ -217,6 +223,8 @@ def main(
         wandb_mode=wandb_mode,
         gaussian_weights=gaussian_weights,
         sam_checkpoint=sam_checkpoint,
+        batch_size=batch_size,
+        val_check_interval=val_check_interval,
         detach=resolve_detach(detach=detach, remote_job=not wait),
     )
 
@@ -225,6 +233,7 @@ def main(
 def smoke(
     run_name: str | None = None,
     dataset: DatasetName = "replica",
+    batch_size: int | None = None,
     dataset_root: str | None = None,
     wandb_mode: str = "disabled",
     gaussian_weights: str | None = None,
@@ -248,5 +257,7 @@ def smoke(
         wandb_mode=wandb_mode,
         gaussian_weights=gaussian_weights,
         sam_checkpoint=sam_checkpoint,
+        batch_size=batch_size,
+        val_check_interval=None,
         detach=resolve_detach(detach=detach, remote_job=not wait),
     )

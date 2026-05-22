@@ -1,6 +1,6 @@
 name: bounded
 
-num_target_views: 6
+num_target_views: 4
 num_context_views: 2
 
 min_distance_between_context_views: 2
