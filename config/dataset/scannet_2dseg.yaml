@@ -12,7 +12,7 @@ test_scene_count: 24
 make_baseline_1: true
 augment: true
 
-input_image_shape: [224, 224]
+input_image_shape: [252, 252]
 original_image_shape: [480, 640]
 cameras_are_circular: false
 

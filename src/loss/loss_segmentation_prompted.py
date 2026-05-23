@@ -56,8 +56,9 @@ class LossSegmentationPrompted(
         )
 
     def dice_loss(self, pred, target):
-        """Compute dice loss between sigmoid predictions and binary targets."""
-        pred_sigmoid = torch.sigmoid(pred)
+        """Compute dice loss between sigmoid predictions and binary targets (fp32)."""
+        pred_sigmoid = torch.sigmoid(pred.float())
+        target = target.float()
         pred_flat = pred_sigmoid.flatten(1)
         target_flat = target.flatten(1)
         intersection = (pred_flat * target_flat).sum(1)
@@ -66,8 +67,10 @@ class LossSegmentationPrompted(
         return loss.mean()
 
     def sigmoid_bce_loss(self, pred, target):
-        """Compute binary cross-entropy loss with logits."""
-        return F.binary_cross_entropy_with_logits(pred, target, reduction="mean")
+        """Compute binary cross-entropy loss with logits (fp32 for stability)."""
+        return F.binary_cross_entropy_with_logits(
+            pred.float(), target.float(), reduction="mean"
+        )
 
     def forward(
         self,

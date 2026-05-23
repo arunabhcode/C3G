@@ -141,8 +141,9 @@ def train_prompted_sam(
         )
 
     cmd = ["uv", "run", "--no-sync", "python", "-m", "src.main", *overrides]
-    print("Running:", " ".join(shlex.quote(part) for part in cmd))
-    subprocess.run(cmd, check=True, cwd=str(WORKSPACE))
+    print("Running:", " ".join(shlex.quote(part) for part in cmd), flush=True)
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    subprocess.run(cmd, check=True, cwd=str(WORKSPACE), env=env)
 
     run_dir = OUTPUT_MOUNT / "runs" / run_name
     output_volume.commit()
