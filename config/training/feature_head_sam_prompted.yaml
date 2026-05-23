@@ -40,10 +40,9 @@ optimizer:
 
 data_loader:
   train:
-    batch_size: 4
+    batch_size: 1
 
 train:
-  mixed_precision: bf16
   context_view_loss: true
   prompt_mode: prompted
   prompted_seg_loss_weight: 1.0
@@ -57,10 +56,16 @@ train:
   lora_rank: 4
 
 trainer:
+<<<<<<< HEAD
   max_steps: 10001 #200000
   val_check_interval: 1000
   accumulate_grad_batches: 16
+=======
+  max_steps: 200000 #5001
+  val_check_interval: 2000
+  accumulate_grad_batches: 4
+>>>>>>> parent of ae52758 (added mixed precision for decreased RAM for training)
 
 checkpointing:
-  every_n_train_steps: 1000
+  every_n_train_steps: 5000
   save_top_k: 5

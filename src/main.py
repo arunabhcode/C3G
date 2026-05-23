@@ -93,8 +93,6 @@ def train(cfg_dict: DictConfig):
     # This allows the current step to be shared with the data loader processes.
     step_tracker = StepTracker()
 
-    # Stream step/loss lines to Modal logs (stdout). Progress bar on Modal only.
-    on_modal = os.environ.get("MODAL_TASK_ID") is not None
     trainer_kwargs: dict = dict(
         max_epochs=-1,
         num_nodes=cfg.trainer.num_nodes,
@@ -113,9 +111,7 @@ def train(cfg_dict: DictConfig):
         callbacks=callbacks,
         val_check_interval=cfg.trainer.val_check_interval,
         check_val_every_n_epoch=None,
-        enable_progress_bar=on_modal,
-        enable_model_summary=not on_modal,
-        log_every_n_steps=cfg.train.print_log_every_n_steps,
+        enable_progress_bar=False,
         gradient_clip_val=cfg.trainer.gradient_clip_val,
         max_steps=cfg.trainer.max_steps,
         inference_mode=False if (cfg.mode == "test" and cfg.test.align_pose) else True,

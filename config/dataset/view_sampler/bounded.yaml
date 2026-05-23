@@ -1,6 +1,10 @@
 name: bounded
 
+<<<<<<< HEAD
 num_target_views: 4
+=======
+num_target_views: 8
+>>>>>>> parent of ae52758 (added mixed precision for decreased RAM for training)
 num_context_views: 2
 
 min_distance_between_context_views: 2

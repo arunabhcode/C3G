@@ -1,7 +1,6 @@
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Literal, Optional, Protocol, runtime_checkable, Any
+from typing import Dict, Optional, Protocol, runtime_checkable, Any
 from itertools import accumulate
 
 import moviepy as mpy
@@ -35,12 +34,6 @@ from ..misc.benchmarker import Benchmarker
 from ..misc.cam_utils import update_pose
 from ..misc.image_io import prep_image, save_image, save_video, visualize_attention_map
 from ..misc.LocalLogger import LOG_PATH, LocalLogger
-from ..misc.mixed_precision import (
-    autocast_dtype_name,
-    cuda_autocast,
-    frozen_cuda_autocast,
-    resolve_bf16_enabled,
-)
 from ..misc.step_tracker import StepTracker
 from ..misc.utils import (
     inverse_normalize,
@@ -144,7 +137,6 @@ class TrainCfg:
     prompted_seg_loss_weight: float = 1.0
     prompt_strategy: str = "centroid"
     min_object_pixels: int = 16
-    mixed_precision: Literal["bf16", "fp32"] = "fp32"
 
 
 @runtime_checkable
@@ -206,7 +198,6 @@ class ModelWrapper(LightningModule):
         self.sam_encoder = sam_encoder
 
         self.validate_sam_config()
-        self._bf16_autocast_enabled = False
 
         if dino is not None:
             self.dino_model = dino["model"]
@@ -306,6 +297,7 @@ class ModelWrapper(LightningModule):
                 f"Supported strategies: {PROMPT_STRATEGIES}"
             )
 
+<<<<<<< HEAD
     def _resolve_bf16_autocast(self) -> bool:
         return resolve_bf16_enabled(self.train_cfg.mixed_precision, self.device)
 
@@ -369,6 +361,8 @@ class ModelWrapper(LightningModule):
     def on_validation_start(self) -> None:
         self._bf16_autocast_enabled = self._resolve_bf16_autocast()
 
+=======
+>>>>>>> parent of ae52758 (added mixed precision for decreased RAM for training)
     def clamp_rendered_features(self, output):
         """Clamp rendered feature maps to [-1e4, 1e4], replacing NaN/Inf values."""
         if output.feature is None:
@@ -410,10 +404,9 @@ class ModelWrapper(LightningModule):
         if gt_masks.dim() == 3:
             gt_masks = gt_masks.unsqueeze(1)
 
-        with self._trainable_autocast():
-            pred_logits = self.decode_sam_mask_logits(rendered_features)
+        pred_logits = self.decode_sam_mask_logits(rendered_features)
         target_masks = rearrange(gt_masks, "b v h w -> (b v) 1 h w")
-        per_sample = scores_from_logits(pred_logits.float(), target_masks)
+        per_sample = scores_from_logits(pred_logits, target_masks)
         agg = mean_scores(per_sample)
         return {
             "iou": torch.tensor(agg["iou"], device=rendered_features.device),
@@ -494,12 +487,11 @@ class ModelWrapper(LightningModule):
         feat_a = output_a.feature[:, 0:1]
         feat_b = output_b.feature[:, 0:1]
 
-        with self._trainable_autocast():
-            logits_a = self.decode_sam_mask_logits(feat_a)
-            logits_b = self.decode_sam_mask_logits(feat_b)
+        logits_a = self.decode_sam_mask_logits(feat_a)
+        logits_b = self.decode_sam_mask_logits(feat_b)
 
-        mask_a = (logits_a[:, 0].float().sigmoid() > 0.5).to(torch.uint8) * 255
-        mask_b = (logits_b[:, 0].float().sigmoid() > 0.5).to(torch.uint8) * 255
+        mask_a = (logits_a[:, 0].sigmoid() > 0.5).to(torch.uint8) * 255
+        mask_b = (logits_b[:, 0].sigmoid() > 0.5).to(torch.uint8) * 255
 
         depth_a = output_a.depth[:, 0] if output_a.depth is not None else None
         h, w = mask_a.shape[-2:]
@@ -588,88 +580,37 @@ class ModelWrapper(LightningModule):
             if self.encoder.cfg.feature_dim
             else None
         )
+        gaussians = self.encoder(
+            batch["context"],
+            self.global_step,
+            visualization_dump=visualization_dump,
+            context_feature=context_feature,
+        )
 
-        with self._trainable_autocast():
-            gaussians = self.encoder(
-                batch["context"],
-                self.global_step,
-                visualization_dump=visualization_dump,
-                context_feature=context_feature,
-            )
-
-            output = self.decoder.forward(
-                gaussians,
-                torch.cat(
-                    [batch["target"]["extrinsics"], batch["context"]["extrinsics"]],
-                    dim=1,
-                ),
-                torch.cat(
-                    [batch["target"]["intrinsics"], batch["context"]["intrinsics"]],
-                    dim=1,
-                ),
-                torch.cat([batch["target"]["near"], batch["context"]["near"]], dim=1),
-                torch.cat([batch["target"]["far"], batch["context"]["far"]], dim=1),
-                (h, w),
-                depth_mode=self.train_cfg.depth_mode,
-                global_step=self.global_step,
-            )
-            output = self.clamp_rendered_features(output)
-
-            # Compute and log loss (trainable forwards under autocast).
-            total_loss = 0
-            for loss_fn in self.losses:
-                loss = loss_fn.forward(
-                    output,
-                    batch,
-                    gaussians,
-                    self.global_step,
-                    target_image=torch.cat(
-                        [batch["target"]["image"], ((batch["context"]["image"] + 1) / 2)],
-                        dim=1,
-                    ),
-                )
-                self.log(
-                    f"loss/{loss_fn.name}",
-                    loss,
-                    on_step=True,
-                    on_epoch=True,
-                    prog_bar=True,
-                    logger=True,
-                )
-                total_loss = total_loss + loss
-
-            if (
-                self.train_cfg.prompt_mode == "prompted"
-                and self.prompted_segmentation_loss is not None
-                and output.feature is not None
-            ):
-                target_labels = batch["target"].get("label")
-                if target_labels is not None:
-                    prompted_loss = self.prompted_segmentation_loss.forward(
-                        output,
-                        batch,
-                        gaussians,
-                        self.global_step,
-                    )
-                    if prompted_loss.item() > 0:
-                        self.log(
-                            "loss/prompted_segmentation",
-                            prompted_loss,
-                            on_step=True,
-                            on_epoch=True,
-                            prog_bar=True,
-                            logger=True,
-                        )
-                        total_loss = total_loss + prompted_loss
+        output = self.decoder.forward(
+            gaussians,
+            torch.cat(
+                [batch["target"]["extrinsics"], batch["context"]["extrinsics"]], dim=1
+            ),
+            torch.cat(
+                [batch["target"]["intrinsics"], batch["context"]["intrinsics"]], dim=1
+            ),
+            torch.cat([batch["target"]["near"], batch["context"]["near"]], dim=1),
+            torch.cat([batch["target"]["far"], batch["context"]["far"]], dim=1),
+            (h, w),
+            depth_mode=self.train_cfg.depth_mode,
+            global_step=self.global_step,
+        )
+        output = self.clamp_rendered_features(output)
 
         target_gt = torch.cat(
             [batch["target"]["image"], ((batch["context"]["image"] + 1) / 2)], dim=1
         )
 
-        # Compute metrics in fp32.
+        # Compute metrics.
         psnr_probabilistic = compute_psnr(
-            rearrange(target_gt, "b v c h w -> (b v) c h w").float(),
-            rearrange(output.color, "b v c h w -> (b v) c h w").float(),
+            rearrange(target_gt, "b v c h w -> (b v) c h w"),
+            rearrange(output.color, "b v c h w -> (b v) c h w"),
         )
         self.log(
             "train/psnr_probabilistic",
@@ -679,6 +620,29 @@ class ModelWrapper(LightningModule):
             prog_bar=True,
             logger=True,
         )
+
+        # Compute and log loss.
+        total_loss = 0
+        for loss_fn in self.losses:
+            loss = loss_fn.forward(
+                output,
+                batch,
+                gaussians,
+                self.global_step,
+                target_image=torch.cat(
+                    [batch["target"]["image"], ((batch["context"]["image"] + 1) / 2)],
+                    dim=1,
+                ),
+            )
+            self.log(
+                f"loss/{loss_fn.name}",
+                loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+            )  # only for coarse gaussians
+            total_loss = total_loss + loss
 
         if self.train_cfg.feature_rendering_loss > 0:
             B, CV, _, H, W = batch["context"]["image"].shape
@@ -704,11 +668,11 @@ class ModelWrapper(LightningModule):
                 align_corners=False,
             ).reshape(B, N, -1, FH, FW)
 
-            gaussian_feature = F.normalize(gaussian_feature.float(), p=2, dim=2)
-            feature = F.normalize(feature.detach().float(), p=2, dim=2)
+            gaussian_feature = F.normalize(gaussian_feature, p=2, dim=2)
+            feature = F.normalize(feature, p=2, dim=2)
 
             feature_rendering_loss = F.cosine_similarity(
-                gaussian_feature, feature, dim=2
+                gaussian_feature, feature.detach(), dim=2
             )
             feature_rendering_loss = (1 - feature_rendering_loss).mean()
 
@@ -725,6 +689,30 @@ class ModelWrapper(LightningModule):
                 + self.train_cfg.feature_rendering_loss * feature_rendering_loss
             )
 
+        if (
+            self.train_cfg.prompt_mode == "prompted"
+            and self.prompted_segmentation_loss is not None
+            and output.feature is not None
+        ):
+            target_labels = batch["target"].get("label")
+            if target_labels is not None:
+                prompted_loss = self.prompted_segmentation_loss.forward(
+                    output,
+                    batch,
+                    gaussians,
+                    self.global_step,
+                )
+                if prompted_loss.item() > 0:
+                    self.log(
+                        "loss/prompted_segmentation",
+                        prompted_loss,
+                        on_step=True,
+                        on_epoch=True,
+                        prog_bar=True,
+                        logger=True,
+                    )
+                    total_loss = total_loss + prompted_loss
+
         self.log(
             "loss/total",
             total_loss,
@@ -737,15 +725,14 @@ class ModelWrapper(LightningModule):
         if (
             self.global_rank == 0
             and self.global_step % self.train_cfg.print_log_every_n_steps == 0
+            and (batch_idx + 1) % self.trainer.accumulate_grad_batches == 0
         ):
             print(
                 f"train step {self.global_step}; "
                 f"scene = {[x[:20] for x in batch['scene']]}; "
                 f"context = {batch['context']['index'].tolist()}; "
-                f"loss = {total_loss:.6f}; "
-                f"psnr = {psnr_probabilistic.mean():.4f}; "
+                f"loss = {total_loss:.6f}",
                 f"low_pass_filter = {self.decoder.low_pass_filter:.3f}",
-                flush=True,
             )
         self.log(
             "info/global_step",
@@ -773,6 +760,7 @@ class ModelWrapper(LightningModule):
             return ctx_sam
         return torch.cat((ctx_sam, tgt_sam * 2 - 1), dim=1)
 
+    @torch.no_grad()
     def forward_foundation_model(
         self,
         input_image,
@@ -782,7 +770,7 @@ class ModelWrapper(LightningModule):
     ):
         B, V, C, H, W = input_image.shape  ## [-1~1]
 
-        with self._frozen_autocast():
+        with torch.no_grad():
             if self.train_cfg.reproj_model == "dinov2":
                 context_feature = self.dino_model.get_intermediate_layers(
                     input_image.reshape(B * V, C, H, W), reshape=True
@@ -852,21 +840,18 @@ class ModelWrapper(LightningModule):
                 context_feature = self.clip_model(input_image.reshape(B * V, C, H, W))
                 context_feature = context_feature.reshape(B, V, -1, H, W)
 
-            if interpolate:
-                context_feature = F.interpolate(
-                    context_feature.reshape(
-                        B * V,
-                        -1,
-                        context_feature.shape[-2],
-                        context_feature.shape[-1],
-                    ),
-                    size=(H // 14, W // 14),
-                    mode="bilinear",
-                    align_corners=False,
-                ).reshape(B, V, -1, H // 14, W // 14)
+        if interpolate:
+            context_feature = F.interpolate(
+                context_feature.reshape(
+                    B * V, -1, context_feature.shape[-2], context_feature.shape[-1]
+                ),
+                size=(H // 14, W // 14),
+                mode="bilinear",
+                align_corners=False,
+            ).reshape(B, V, -1, H // 14, W // 14)
 
-        ## B, V, C, H, W — detached teacher features for trainable modules
-        return context_feature.detach()
+        ## B, V, C, H, W
+        return context_feature
 
     def _run_lerf_mask_eval(
         self,
@@ -888,10 +873,9 @@ class ModelWrapper(LightningModule):
         ):
             return
 
-        with self._trainable_autocast():
-            pred_logits = self.decode_sam_mask_logits(output.feature)
+        pred_logits = self.decode_sam_mask_logits(output.feature)
         target_masks = gt_masks.unsqueeze(1) if gt_masks.dim() == 3 else gt_masks
-        per_sample = scores_from_logits(pred_logits.float(), target_masks)
+        per_sample = scores_from_logits(pred_logits, target_masks)
         scores = per_sample[0]
 
         pred_masks = pred_logits.sigmoid() > 0.5
@@ -979,24 +963,10 @@ class ModelWrapper(LightningModule):
             else None
         )
 
-        with self._trainable_autocast():
-            with self.benchmarker.time("encoder"):
-                gaussians = self.encoder(
-                    batch["context"], self.global_step, context_feature=context_feature
-                )
-
-            if self.test_cfg.align_pose and (not self.test_cfg.forward_vfm):
-                output = self.test_step_align(batch, gaussians, verbose=True)
-            else:
-                with self.benchmarker.time("decoder", num_calls=v):
-                    output = self.decoder.forward(
-                        gaussians,
-                        batch["target"]["extrinsics"],
-                        batch["target"]["intrinsics"],
-                        batch["target"]["near"],
-                        batch["target"]["far"],
-                        (h, w),
-                    )
+        with self.benchmarker.time("encoder"):
+            gaussians = self.encoder(
+                batch["context"], self.global_step, context_feature=context_feature
+            )
 
         if self.test_cfg.visualize_gaussian_token >= 0:
             num_heads = self.encoder.gmae_decoder.layers[0][0].heads
@@ -1032,6 +1002,19 @@ class ModelWrapper(LightningModule):
                 torch.tensor([[1, 0, 0]]) - 0.5
             ) / C0
 
+        if self.test_cfg.align_pose and (not self.test_cfg.forward_vfm):
+            output = self.test_step_align(batch, gaussians, verbose=True)
+        else:
+            with self.benchmarker.time("decoder", num_calls=v):
+                output = self.decoder.forward(
+                    gaussians,
+                    batch["target"]["extrinsics"],
+                    batch["target"]["intrinsics"],
+                    batch["target"]["near"],
+                    batch["target"]["far"],
+                    (h, w),
+                )
+
         (scene,) = batch["scene"]
         name = get_cfg()["wandb"]["name"]
         path = self.test_cfg.output_path / name
@@ -1047,10 +1030,10 @@ class ModelWrapper(LightningModule):
             rgb_pred = output.color[0]
             rgb_gt = batch["target"]["image"][0]
 
-            psnr = compute_psnr(rgb_gt.float(), rgb_pred.float()).mean()
+            psnr = compute_psnr(rgb_gt, rgb_pred).mean()
             all_metrics = {
-                f"lpips_ours": compute_lpips(rgb_gt.float(), rgb_pred.float()).mean(),
-                f"ssim_ours": compute_ssim(rgb_gt.float(), rgb_pred.float()).mean(),
+                f"lpips_ours": compute_lpips(rgb_gt, rgb_pred).mean(),
+                f"ssim_ours": compute_ssim(rgb_gt, rgb_pred).mean(),
                 f"psnr_ours": psnr,
             }
             methods = ["ours"]
@@ -1531,24 +1514,22 @@ class ModelWrapper(LightningModule):
             else None
         )
 
-        with self._trainable_autocast():
-            gaussians = self.encoder(
-                batch["context"],
-                self.global_step,
-                visualization_dump=visualization_dump,
-                context_feature=context_feature,
-            )
+        gaussians = self.encoder(
+            batch["context"],
+            self.global_step,
+            visualization_dump=visualization_dump,
+            context_feature=context_feature,
+        )
 
-            output = self.decoder.forward(
-                gaussians,
-                batch["target"]["extrinsics"],
-                batch["target"]["intrinsics"],
-                batch["target"]["near"],
-                batch["target"]["far"],
-                (h, w),
-                "depth",
-            )
-
+        output = self.decoder.forward(
+            gaussians,
+            batch["target"]["extrinsics"],
+            batch["target"]["intrinsics"],
+            batch["target"]["near"],
+            batch["target"]["far"],
+            (h, w),
+            "depth",
+        )
         rgb_pred = output.color[0]
         depth_pred = vis_depth_map(output.depth[0])
 
@@ -1557,11 +1538,11 @@ class ModelWrapper(LightningModule):
         if gaussian_means.shape[-1] == 3:
             gaussian_means = gaussian_means.mean(dim=-1)
 
-        # Compute validation metrics in fp32.
+        # Compute validation metrics.
         rgb_gt = batch["target"]["image"][0]
-        psnr = compute_psnr(rgb_gt.float(), rgb_pred.float()).mean()
-        lpips = compute_lpips(rgb_gt.float(), rgb_pred.float()).mean()
-        ssim = compute_ssim(rgb_gt.float(), rgb_pred.float()).mean()
+        psnr = compute_psnr(rgb_gt, rgb_pred).mean()
+        lpips = compute_lpips(rgb_gt, rgb_pred).mean()
+        ssim = compute_ssim(rgb_gt, rgb_pred).mean()
         self.log(f"val/psnr", psnr)
         self.log(f"val/lpips", lpips)
         self.log(f"val/ssim", ssim)
