@@ -57,7 +57,7 @@ train:
   lora_rank: 4
 
 trainer:
-  max_steps: 5001 #200000
+  max_steps: 10001 #200000
   val_check_interval: 1000
   accumulate_grad_batches: 16
 

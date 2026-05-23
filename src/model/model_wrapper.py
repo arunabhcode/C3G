@@ -347,11 +347,21 @@ class ModelWrapper(LightningModule):
                 f"optimizer/grads=fp32",
                 flush=True,
             )
-        self.log("train/mixed_precision_enabled", float(self._bf16_autocast_enabled))
-        self.log(
-            "train/autocast_dtype_bf16",
-            1.0 if self._bf16_autocast_enabled else 0.0,
-        )
+        # Lightning disallows self.log() in on_fit_start; log via W&B directly if present.
+        if self.logger is not None:
+            experiment = getattr(self.logger, "experiment", None)
+            if experiment is not None and hasattr(experiment, "log"):
+                experiment.log(
+                    {
+                        "train/mixed_precision_enabled": float(
+                            self._bf16_autocast_enabled
+                        ),
+                        "train/autocast_dtype_bf16": (
+                            1.0 if self._bf16_autocast_enabled else 0.0
+                        ),
+                    },
+                    step=0,
+                )
 
     def on_test_start(self) -> None:
         self._bf16_autocast_enabled = self._resolve_bf16_autocast()
