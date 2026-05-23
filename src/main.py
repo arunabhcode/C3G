@@ -14,6 +14,7 @@ from lightning.pytorch.strategies import DDPStrategy
 from omegaconf import DictConfig, OmegaConf
 
 from src.misc.weight_modify import checkpoint_filter_fn
+from src.model.encoder.common.gmae import remap_instill_to_qkv_checkpoint
 from src.model.distiller import get_distiller
 
 # Configure beartype and jaxtyping.
@@ -137,6 +138,7 @@ def train(cfg_dict: DictConfig):
         if "model" in ckpt_weights:
             ckpt_weights = ckpt_weights["model"]
             ckpt_weights = checkpoint_filter_fn(ckpt_weights, encoder)
+            ckpt_weights = remap_instill_to_qkv_checkpoint(ckpt_weights)
             missing_keys, unexpected_keys = encoder.load_state_dict(
                 ckpt_weights, strict=False
             )
@@ -145,6 +147,7 @@ def train(cfg_dict: DictConfig):
             ckpt_weights = {
                 k[8:]: v for k, v in ckpt_weights.items() if k.startswith("encoder.")
             }
+            ckpt_weights = remap_instill_to_qkv_checkpoint(ckpt_weights)
             missing_keys, unexpected_keys = encoder.load_state_dict(
                 ckpt_weights, strict=False
             )
@@ -155,6 +158,7 @@ def train(cfg_dict: DictConfig):
                     new_ckpt[f"backbone.{key}"] = value
                 if "point_head" in key:
                     new_ckpt[key.replace("point_head", "dpt_head")] = value
+            new_ckpt = remap_instill_to_qkv_checkpoint(new_ckpt)
             missing_keys, unexpected_keys = encoder.load_state_dict(
                 new_ckpt, strict=False
             )

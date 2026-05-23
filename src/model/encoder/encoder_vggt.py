@@ -23,7 +23,7 @@ from .encoder import Encoder
 from .common.gmae import (
     Transformer,
     InstillTransformer,
-    freeze_instill_attention_qk,
+    remap_instill_to_qkv_checkpoint,
 )
 from .backbone.croco.misc import fill_default_args, freeze_all_params
 
@@ -119,9 +119,8 @@ class EncoderVGGT(Encoder[EncoderVGGTCfg]):
                 dim_head=transformer_dim // 16,
                 mlp_dim=transformer_dim * 2,
                 cfg=cfg,
+                freeze_instill_qk=cfg.freeze_instill_qk,
             )
-            if cfg.freeze_instill_qk:
-                freeze_instill_attention_qk(self.gmae_decoder)
 
             if self.cfg.different_learnable_tokens:
                 self.gaussian_tokens_feature = nn.Parameter(
@@ -150,6 +149,10 @@ class EncoderVGGT(Encoder[EncoderVGGTCfg]):
         self.gmae_to_gaussians = nn.Linear(
             transformer_dim, self.raw_gs_dim * cfg.gaussians_per_token
         )
+
+    def load_state_dict(self, state_dict, strict=True, **kwargs):
+        state_dict = remap_instill_to_qkv_checkpoint(state_dict)
+        return super().load_state_dict(state_dict, strict=strict, **kwargs)
 
     def map_pdf_to_opacity(
         self,

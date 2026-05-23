@@ -882,14 +882,10 @@ class ModelWrapper(LightningModule):
             outputs = []
 
             def hook_fn(module, input, output):
-                outputs.append(output)
+                outputs.append(module._last_qkv)
 
-            _ = self.encoder.gmae_decoder.layers[0][0].to_qkv.register_forward_hook(
-                hook_fn
-            )
-            _ = self.encoder.gmae_decoder.layers[1][0].to_qkv.register_forward_hook(
-                hook_fn
-            )
+            _ = self.encoder.gmae_decoder.layers[0][0].register_forward_hook(hook_fn)
+            _ = self.encoder.gmae_decoder.layers[1][0].register_forward_hook(hook_fn)
 
         # Render Gaussians.
         context_feature = (
