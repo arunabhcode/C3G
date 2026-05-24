@@ -278,7 +278,7 @@ def build_sam_train_overrides(
     run_name: str,
     dataset: DatasetName,
     dataset_root: str,
-    max_steps: int | None,
+    max_steps: int,
     wandb_mode: str,
     gaussian_weights: str | Path | None = None,
     sam_checkpoint: str | Path | None = None,
@@ -308,12 +308,11 @@ def build_sam_train_overrides(
         f"wandb.project={run_name}",
         f"wandb.name={run_name}",
         f"hydra.run.dir={run_dir}",
+        f"trainer.max_steps={max_steps}",
         f"model.encoder.pretrained_weights={encoder_weights}",
         f"train.sam_checkpoint={sam_path}",
         f"{spec['roots_key']}=[{dataset_root}]",
     ]
-    if max_steps is not None:
-        overrides.append(f"trainer.max_steps={max_steps}")
     if val_interval is not None:
         overrides.append(f"trainer.val_check_interval={val_interval}")
     if batch_size is not None:
@@ -358,7 +357,7 @@ def build_prompted_train_overrides(
     run_name: str,
     dataset: DatasetName,
     dataset_root: str,
-    max_steps: int | None,
+    max_steps: int,
     wandb_mode: str,
     gaussian_weights: str | Path | None = None,
     sam_checkpoint: str | Path | None = None,

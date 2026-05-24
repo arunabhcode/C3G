@@ -9,7 +9,7 @@ Upload weights::
     modal volume put c3g-weights /path/to/sam_vit_h.pth sam_vit_h.pth
     modal volume put c3g-weights /path/to/gaussian_decoder.ckpt gaussian_decoder.ckpt
 
-Smoke test (``train.print_log_every_n_steps`` optimizer steps, first scene; detached by default)::
+Smoke test (one optimizer step, first scene; detached by default)::
 
     modal run src/inference/modal_train_c3g_sam.py::smoke --dataset replica
     modal run src/inference/modal_train_c3g_sam.py::smoke --dataset scannet --wait
@@ -127,7 +127,7 @@ def train_prompted_sam(
         run_name=run_name,
         dataset=dataset,
         dataset_root=data_root,
-        max_steps=None if smoke else max_steps,
+        max_steps=1 if smoke else max_steps,
         wandb_mode=wandb_mode,
         gaussian_weights=encoder_weights,
         sam_checkpoint=sam_path,
@@ -139,7 +139,6 @@ def train_prompted_sam(
     if smoke:
         overrides.extend(
             [
-                "trainer.max_steps=${train.print_log_every_n_steps}",
                 "data_loader.train.num_workers=0",
                 "checkpointing.every_n_train_steps=1000000",
             ]
@@ -250,11 +249,7 @@ def smoke(
     detach: bool | None = None,
     wait: bool = False,
 ) -> None:
-    """Prompted training smoke test on the first scene (Replica or ScanNet).
-
-    Runs for ``train.print_log_every_n_steps`` optimizer steps (from Hydra config)
-    so training logs appear before the run exits.
-    """
+    """One optimizer-step prompted training smoke test on the first scene."""
     if dataset not in DATASET_SPECS:
         print(
             f"Unknown dataset {dataset!r}; choose one of: {', '.join(DATASET_SPECS)}",
@@ -264,7 +259,7 @@ def smoke(
     _dispatch_train(
         run_name=run_name or _default_run_name(dataset, smoke=True),
         dataset=dataset,
-        max_steps=5001,
+        max_steps=1,
         smoke=True,
         dataset_root=dataset_root,
         wandb_mode=wandb_mode,
