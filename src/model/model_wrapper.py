@@ -255,6 +255,7 @@ class ModelWrapper(LightningModule):
         self.per_image_accs = []
         self.per_image_warpmIOUs = []
         self.per_image_boundarymIOUs = []
+        self._pending_step_zero_metrics: dict[str, float] | None = None
 
     @rank_zero_only
     def on_train_start(self) -> None:
@@ -268,20 +269,44 @@ class ModelWrapper(LightningModule):
             flush=True,
         )
 
+    @staticmethod
+    def _metrics_to_floats(metrics: dict[str, Tensor]) -> dict[str, float]:
+        return {
+            key: value.detach().item()
+            if isinstance(value, Tensor)
+            else float(value)
+            for key, value in metrics.items()
+        }
+
     @rank_zero_only
-    def _log_metrics_at_step(self, metrics: dict[str, Tensor], step: int) -> None:
-        """Push metrics to the experiment logger at an explicit global step."""
-        if self.logger is None or isinstance(self.logger, LocalLogger):
+    def _flush_step_zero_metrics(self, metrics: dict[str, float]) -> None:
+        """Push train metrics for optimizer step 0 to W&B.
+
+        Lightning skips step 0 for ``self.log`` and ``logger.log_metrics(step=0)``
+        does not pass ``step=`` to ``wandb.log``, so flush after the first optimizer
+        step completes using the same ``trainer/global_step`` x-axis as WandbLogger.
+        """
+        if isinstance(self.logger, LocalLogger) or self.trainer is None:
             return
-        self.logger.log_metrics(
-            {
-                key: value.detach().item()
-                if isinstance(value, Tensor)
-                else float(value)
-                for key, value in metrics.items()
-            },
-            step=step,
-        )
+
+        payload = {
+            key: value for key, value in metrics.items() if key != "info/global_step"
+        }
+        payload["trainer/global_step"] = 0.0
+
+        logger = self.trainer.logger
+        if isinstance(logger, WandbLogger):
+            logger.experiment.log(payload, commit=True)
+        elif wandb.run is not None:
+            wandb.log(payload, commit=True)
+
+    @rank_zero_only
+    def on_train_batch_end(self, outputs, batch, batch_idx: int) -> None:
+        pending = self._pending_step_zero_metrics
+        if pending is None:
+            return
+        self._pending_step_zero_metrics = None
+        self._flush_step_zero_metrics(pending)
 
     @rank_zero_only
     def on_train_batch_start(self, batch, batch_idx: int) -> None:
@@ -706,8 +731,12 @@ class ModelWrapper(LightningModule):
 
         accum = self.trainer.accumulate_grad_batches or 1
         optimizer_step_complete = (batch_idx + 1) % accum == 0
-        if optimizer_step_complete and self.global_step == 0:
-            self._log_metrics_at_step(step_metrics, step=0)
+        if (
+            optimizer_step_complete
+            and self.global_step == 0
+            and self.global_rank == 0
+        ):
+            self._pending_step_zero_metrics = self._metrics_to_floats(step_metrics)
 
         if self.global_rank == 0 and optimizer_step_complete:
             print(
