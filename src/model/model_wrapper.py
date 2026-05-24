@@ -263,8 +263,24 @@ class ModelWrapper(LightningModule):
             "Training started: "
             f"accumulate_grad_batches={accum} "
             f"(~{accum} heavy micro-batches per optimizer step), "
-            f"print_log_every_n_steps={self.train_cfg.print_log_every_n_steps}",
+            f"print_log_every_n_steps={self.train_cfg.print_log_every_n_steps}, "
+            f"log_every_n_steps={self.trainer.log_every_n_steps}",
             flush=True,
+        )
+
+    @rank_zero_only
+    def _log_metrics_at_step(self, metrics: dict[str, Tensor], step: int) -> None:
+        """Push metrics to the experiment logger at an explicit global step."""
+        if self.logger is None or isinstance(self.logger, LocalLogger):
+            return
+        self.logger.log_metrics(
+            {
+                key: value.detach().item()
+                if isinstance(value, Tensor)
+                else float(value)
+                for key, value in metrics.items()
+            },
+            step=step,
         )
 
     @rank_zero_only
@@ -579,6 +595,9 @@ class ModelWrapper(LightningModule):
 
         # Compute and log loss.
         total_loss = 0
+        step_metrics: dict[str, Tensor] = {
+            "train/psnr_probabilistic": psnr_probabilistic.mean(),
+        }
         for loss_fn in self.losses:
             loss = loss_fn.forward(
                 output,
@@ -598,6 +617,7 @@ class ModelWrapper(LightningModule):
                 prog_bar=True,
                 logger=True,
             )  # only for coarse gaussians
+            step_metrics[f"loss/{loss_fn.name}"] = loss
             total_loss = total_loss + loss
 
         if self.train_cfg.feature_rendering_loss > 0:
@@ -640,6 +660,7 @@ class ModelWrapper(LightningModule):
                 prog_bar=True,
                 logger=True,
             )
+            step_metrics["loss/feature_rendering_loss"] = feature_rendering_loss
             total_loss = (
                 total_loss
                 + self.train_cfg.feature_rendering_loss * feature_rendering_loss
@@ -667,6 +688,7 @@ class ModelWrapper(LightningModule):
                         prog_bar=True,
                         logger=True,
                     )
+                    step_metrics["loss/prompted_segmentation"] = prompted_loss
                     total_loss = total_loss + prompted_loss
 
         self.log(
@@ -677,9 +699,17 @@ class ModelWrapper(LightningModule):
             prog_bar=True,
             logger=True,
         )
+        step_metrics["loss/total"] = total_loss
+        step_metrics["info/global_step"] = torch.tensor(
+            self.global_step, device=total_loss.device, dtype=torch.float32
+        )
 
         accum = self.trainer.accumulate_grad_batches or 1
-        if self.global_rank == 0 and (batch_idx + 1) % accum == 0:
+        optimizer_step_complete = (batch_idx + 1) % accum == 0
+        if optimizer_step_complete and self.global_step == 0:
+            self._log_metrics_at_step(step_metrics, step=0)
+
+        if self.global_rank == 0 and optimizer_step_complete:
             print(
                 f"train step {self.global_step} finished; "
                 f"scene = {[x[:20] for x in batch['scene']]}; "

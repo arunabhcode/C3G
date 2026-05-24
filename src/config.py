@@ -36,6 +36,8 @@ class TrainerCfg:
     num_nodes: int = 1
     accumulate_grad_batches: int = 1
     limit_test_batches: int | float | None = None
+    # How often Lightning flushes self.log metrics to W&B (optimizer steps).
+    log_every_n_steps: int = 10
 
 
 def val_check_interval_in_training_batches(

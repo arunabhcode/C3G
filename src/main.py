@@ -120,6 +120,7 @@ def train(cfg_dict: DictConfig):
         max_steps=cfg.trainer.max_steps,
         inference_mode=False if (cfg.mode == "test" and cfg.test.align_pose) else True,
         accumulate_grad_batches=cfg.trainer.accumulate_grad_batches,
+        log_every_n_steps=cfg.trainer.log_every_n_steps,
     )
     if cfg.trainer.limit_test_batches is not None:
         trainer_kwargs["limit_test_batches"] = cfg.trainer.limit_test_batches
