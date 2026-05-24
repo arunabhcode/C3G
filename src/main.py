@@ -22,7 +22,7 @@ with install_import_hook(
     ("src",),
     ("beartype", "beartype"),
 ):
-    from src.config import load_typed_root_config
+    from src.config import load_typed_root_config, val_check_interval_in_training_batches
     from src.dataset.data_module import DataModule
     from src.global_cfg import set_cfg
     from src.loss import get_losses
@@ -109,7 +109,10 @@ def train(cfg_dict: DictConfig):
             else "auto"
         ),
         callbacks=callbacks,
-        val_check_interval=cfg.trainer.val_check_interval,
+        val_check_interval=val_check_interval_in_training_batches(
+            cfg.trainer.val_check_interval,
+            cfg.trainer.accumulate_grad_batches,
+        ),
         check_val_every_n_epoch=None,
         enable_progress_bar=False,
         gradient_clip_val=cfg.trainer.gradient_clip_val,

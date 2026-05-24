@@ -30,11 +30,22 @@ class ModelCfg:
 @dataclass
 class TrainerCfg:
     max_steps: int
+    # Optimizer steps between validation runs (int), or fraction of a train epoch (float).
     val_check_interval: int | float | None
     gradient_clip_val: int | float | None
     num_nodes: int = 1
     accumulate_grad_batches: int = 1
     limit_test_batches: int | float | None = None
+
+
+def val_check_interval_in_training_batches(
+    val_check_interval: int | float | None,
+    accumulate_grad_batches: int,
+) -> int | float | None:
+    """Map config val_check_interval (optimizer steps) to Lightning training batches."""
+    if val_check_interval is None or not isinstance(val_check_interval, int):
+        return val_check_interval
+    return val_check_interval * accumulate_grad_batches
 
 
 @dataclass
