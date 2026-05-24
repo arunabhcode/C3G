@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -137,6 +140,57 @@ def resolve_detach(*, detach: bool | None, remote_job: bool) -> bool:
     if detach is not None:
         return detach
     return remote_job
+
+
+def run_subprocess_with_output_commit(
+    *,
+    cmd: list[str],
+    cwd: Path | str,
+    run_dir: Path,
+    commit: Callable[[], None],
+    poll_interval_s: float = 15.0,
+) -> None:
+    """Run a training subprocess and persist ``run_dir`` to a Modal output volume.
+
+    Commits when the Hydra run directory first appears and whenever a new
+    ``*.ckpt`` file shows up under ``run_dir/checkpoints/``. A final commit
+    always runs after the subprocess exits (success or failure).
+    """
+    stop_event = threading.Event()
+    checkpoints_dir = run_dir / "checkpoints"
+    seen_checkpoints: set[str] = set()
+    run_dir_committed = False
+
+    def _commit_loop() -> None:
+        nonlocal run_dir_committed
+        while not stop_event.is_set():
+            if run_dir.is_dir() and not run_dir_committed:
+                commit()
+                run_dir_committed = True
+                print(f"Committed output volume (run dir): {run_dir}")
+
+            if checkpoints_dir.is_dir():
+                for ckpt in checkpoints_dir.glob("*.ckpt"):
+                    if ckpt.name not in seen_checkpoints:
+                        seen_checkpoints.add(ckpt.name)
+                        commit()
+                        print(f"Committed output volume (checkpoint): {ckpt.name}")
+
+            stop_event.wait(poll_interval_s)
+
+    thread = threading.Thread(
+        target=_commit_loop,
+        name="modal-output-commit",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        subprocess.run(cmd, check=True, cwd=str(cwd))
+    finally:
+        stop_event.set()
+        thread.join(timeout=poll_interval_s + 5)
+        commit()
+        print(f"Committed output volume (final): {run_dir}")
 
 
 def find_smoke_scene(

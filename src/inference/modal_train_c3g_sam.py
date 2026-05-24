@@ -19,13 +19,15 @@ Full training (spawn on Modal by default; use ``--wait`` to block locally)::
     modal run src/inference/modal_train_c3g_sam.py --run-name sam_prompted_replica --dataset replica
     modal run --detach src/inference/modal_train_c3g_sam.py --run-name sam_prompted_scannet --dataset scannet
     modal run src/inference/modal_train_c3g_sam.py --run-name my_run --dataset scannet --batch-size 4
+
+Checkpoints are written to the ``c3g-train-outputs`` volume at
+``runs/{run_name}/checkpoints/`` and committed after each new ``.ckpt`` file.
 """
 
 from __future__ import annotations
 
 import os
 import shlex
-import subprocess
 import sys
 from pathlib import Path
 
@@ -49,6 +51,7 @@ from src.inference.modal_sam_common import (
     resolve_dataset_root,
     resolve_detach,
     resolve_training_weights,
+    run_subprocess_with_output_commit,
 )
 
 APP_NAME = "c3g-sam-prompted-simple"
@@ -140,12 +143,16 @@ def train_prompted_sam(
             ]
         )
 
+    run_dir = OUTPUT_MOUNT / "runs" / run_name
     cmd = ["uv", "run", "--no-sync", "python", "-m", "src.main", *overrides]
     print("Running:", " ".join(shlex.quote(part) for part in cmd))
-    subprocess.run(cmd, check=True, cwd=str(WORKSPACE))
-
-    run_dir = OUTPUT_MOUNT / "runs" / run_name
-    output_volume.commit()
+    print(f"Checkpoints on volume `{OUTPUT_VOLUME}`: {run_dir / 'checkpoints'}")
+    run_subprocess_with_output_commit(
+        cmd=cmd,
+        cwd=WORKSPACE,
+        run_dir=run_dir,
+        commit=output_volume.commit,
+    )
     return str(run_dir)
 
 
