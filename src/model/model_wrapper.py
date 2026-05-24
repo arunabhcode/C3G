@@ -256,6 +256,28 @@ class ModelWrapper(LightningModule):
         self.per_image_warpmIOUs = []
         self.per_image_boundarymIOUs = []
 
+    @rank_zero_only
+    def on_train_start(self) -> None:
+        accum = self.trainer.accumulate_grad_batches or 1
+        print(
+            "Training started: "
+            f"accumulate_grad_batches={accum} "
+            f"(~{accum} heavy micro-batches per optimizer step), "
+            f"print_log_every_n_steps={self.train_cfg.print_log_every_n_steps}",
+            flush=True,
+        )
+
+    @rank_zero_only
+    def on_train_batch_start(self, batch, batch_idx: int) -> None:
+        accum = self.trainer.accumulate_grad_batches or 1
+        micro = (batch_idx % accum) + 1
+        if batch_idx == 0 or micro == 1 or micro == accum:
+            print(
+                f"train micro-batch {batch_idx + 1} starting "
+                f"(accum {micro}/{accum}, global_step={self.global_step})",
+                flush=True,
+            )
+
     def validate_sam_config(self):
         """Validate SAM-related configuration at initialization time."""
         SAM_VARIANTS = {"sam_vit_h", "sam_vit_l", "sam_vit_b"}
@@ -656,17 +678,15 @@ class ModelWrapper(LightningModule):
             logger=True,
         )
 
-        if (
-            self.global_rank == 0
-            and self.global_step % self.train_cfg.print_log_every_n_steps == 0
-            and (batch_idx + 1) % self.trainer.accumulate_grad_batches == 0
-        ):
+        accum = self.trainer.accumulate_grad_batches or 1
+        if self.global_rank == 0 and (batch_idx + 1) % accum == 0:
             print(
-                f"train step {self.global_step}; "
+                f"train step {self.global_step} finished; "
                 f"scene = {[x[:20] for x in batch['scene']]}; "
                 f"context = {batch['context']['index'].tolist()}; "
-                f"loss = {total_loss:.6f}",
+                f"loss = {total_loss:.6f}; "
                 f"low_pass_filter = {self.decoder.low_pass_filter:.3f}",
+                flush=True,
             )
         self.log(
             "info/global_step",

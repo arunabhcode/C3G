@@ -71,6 +71,7 @@ def train(cfg_dict: DictConfig):
         # On rank != 0, wandb.run is None.
         if wandb.run is not None:
             wandb.run.log_code("src")
+            print(cyan(f"W&B run: {wandb.run.url}"))
     else:
         logger = LocalLogger()
 
