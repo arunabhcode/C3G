@@ -58,7 +58,7 @@ train:
 trainer:
   max_steps: 5001
   val_check_interval: 500
-  accumulate_grad_batches: 32
+  accumulate_grad_batches: 8
 
 checkpointing:
   every_n_train_steps: 500
