@@ -78,7 +78,7 @@ def _validate_dataset_root(dataset: DatasetName, dataset_root: str) -> None:
 
 @app.function(
     image=build_c3g_modal_image(),
-    gpu="A100-80GB",
+    gpu="H200",
     timeout=60 * 60 * 24,
     secrets=[WANDB_SECRET],
     volumes={

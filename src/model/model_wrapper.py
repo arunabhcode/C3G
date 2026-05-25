@@ -124,7 +124,6 @@ class TestCfg:
 class TrainCfg:
     depth_mode: DepthRenderingMode | None
     extended_visualization: bool
-    print_log_every_n_steps: int
     random_select_context_view: bool = False
     reproj_model: str = "none"  # 'vggt' or 'dino'
     feature_rendering_loss: float = 0.0
@@ -255,7 +254,6 @@ class ModelWrapper(LightningModule):
         self.per_image_accs = []
         self.per_image_warpmIOUs = []
         self.per_image_boundarymIOUs = []
-        self._pending_step_zero_metrics: dict[str, float] | None = None
 
     @rank_zero_only
     def on_train_start(self) -> None:
@@ -264,49 +262,9 @@ class ModelWrapper(LightningModule):
             "Training started: "
             f"accumulate_grad_batches={accum} "
             f"(~{accum} heavy micro-batches per optimizer step), "
-            f"print_log_every_n_steps={self.train_cfg.print_log_every_n_steps}, "
             f"log_every_n_steps={self.trainer.log_every_n_steps}",
             flush=True,
         )
-
-    @staticmethod
-    def _metrics_to_floats(metrics: dict[str, Tensor]) -> dict[str, float]:
-        return {
-            key: value.detach().item()
-            if isinstance(value, Tensor)
-            else float(value)
-            for key, value in metrics.items()
-        }
-
-    @rank_zero_only
-    def _flush_step_zero_metrics(self, metrics: dict[str, float]) -> None:
-        """Push train metrics for optimizer step 0 to W&B.
-
-        Lightning skips step 0 for ``self.log`` and ``logger.log_metrics(step=0)``
-        does not pass ``step=`` to ``wandb.log``, so flush after the first optimizer
-        step completes using the same ``trainer/global_step`` x-axis as WandbLogger.
-        """
-        if isinstance(self.logger, LocalLogger) or self.trainer is None:
-            return
-
-        payload = {
-            key: value for key, value in metrics.items() if key != "info/global_step"
-        }
-        payload["trainer/global_step"] = 0.0
-
-        logger = self.trainer.logger
-        if isinstance(logger, WandbLogger):
-            logger.experiment.log(payload, commit=True)
-        elif wandb.run is not None:
-            wandb.log(payload, commit=True)
-
-    @rank_zero_only
-    def on_train_batch_end(self, outputs, batch, batch_idx: int) -> None:
-        pending = self._pending_step_zero_metrics
-        if pending is None:
-            return
-        self._pending_step_zero_metrics = None
-        self._flush_step_zero_metrics(pending)
 
     @rank_zero_only
     def on_train_batch_start(self, batch, batch_idx: int) -> None:
@@ -620,9 +578,6 @@ class ModelWrapper(LightningModule):
 
         # Compute and log loss.
         total_loss = 0
-        step_metrics: dict[str, Tensor] = {
-            "train/psnr_probabilistic": psnr_probabilistic.mean(),
-        }
         for loss_fn in self.losses:
             loss = loss_fn.forward(
                 output,
@@ -642,7 +597,6 @@ class ModelWrapper(LightningModule):
                 prog_bar=True,
                 logger=True,
             )  # only for coarse gaussians
-            step_metrics[f"loss/{loss_fn.name}"] = loss
             total_loss = total_loss + loss
 
         if self.train_cfg.feature_rendering_loss > 0:
@@ -685,7 +639,6 @@ class ModelWrapper(LightningModule):
                 prog_bar=True,
                 logger=True,
             )
-            step_metrics["loss/feature_rendering_loss"] = feature_rendering_loss
             total_loss = (
                 total_loss
                 + self.train_cfg.feature_rendering_loss * feature_rendering_loss
@@ -713,7 +666,6 @@ class ModelWrapper(LightningModule):
                         prog_bar=True,
                         logger=True,
                     )
-                    step_metrics["loss/prompted_segmentation"] = prompted_loss
                     total_loss = total_loss + prompted_loss
 
         self.log(
@@ -724,21 +676,9 @@ class ModelWrapper(LightningModule):
             prog_bar=True,
             logger=True,
         )
-        step_metrics["loss/total"] = total_loss
-        step_metrics["info/global_step"] = torch.tensor(
-            self.global_step, device=total_loss.device, dtype=torch.float32
-        )
 
         accum = self.trainer.accumulate_grad_batches or 1
-        optimizer_step_complete = (batch_idx + 1) % accum == 0
-        if (
-            optimizer_step_complete
-            and self.global_step == 0
-            and self.global_rank == 0
-        ):
-            self._pending_step_zero_metrics = self._metrics_to_floats(step_metrics)
-
-        if self.global_rank == 0 and optimizer_step_complete:
+        if self.global_rank == 0 and (batch_idx + 1) % accum == 0:
             print(
                 f"train step {self.global_step} finished; "
                 f"scene = {[x[:20] for x in batch['scene']]}; "

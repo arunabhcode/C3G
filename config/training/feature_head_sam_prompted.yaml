@@ -34,13 +34,13 @@ model:
     feature_detach: false
 
 optimizer:
-  lr: 1e-4
+  lr: 1e-5
   warm_up_steps: 1000
   backbone_lr_multiplier: 0.01
 
 data_loader:
   train:
-    batch_size: 2
+    batch_size: 4
 
 train:
   context_view_loss: true
@@ -58,7 +58,7 @@ train:
 trainer:
   max_steps: 5001
   val_check_interval: 500
-  accumulate_grad_batches: 4
+  accumulate_grad_batches: 2
 
 checkpointing:
   every_n_train_steps: 500
