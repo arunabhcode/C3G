@@ -56,6 +56,7 @@ from ..visualization.validation_in_3d import render_cameras, render_projections
 from .decoder.decoder import Decoder, DepthRenderingMode
 from .encoder import Encoder
 from .encoder.visualization.encoder_visualizer import EncoderVisualizer
+from .types import Gaussians
 from .utils import save_segmap, run_pca
 from ..loss.loss_segmentation_prompted import (
     LossSegmentationPrompted,
@@ -541,6 +542,15 @@ class ModelWrapper(LightningModule):
             visualization_dump=visualization_dump,
             context_feature=context_feature,
         )
+
+        if self.train_cfg.prompt_mode == "prompted":
+            gaussians = Gaussians(
+                means=gaussians.means.detach(),
+                covariances=gaussians.covariances.detach(),
+                harmonics=gaussians.harmonics.detach(),
+                opacities=gaussians.opacities.detach(),
+                feature=gaussians.feature,
+            )
 
         output = self.decoder.forward(
             gaussians,

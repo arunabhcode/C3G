@@ -4,7 +4,7 @@ defaults:
   # Dataset is selected at launch, e.g. +dataset@_group_.scannet_2dseg=scannet_2dseg
   - override /model/encoder: noposplat
   - override /model/encoder/backbone: croco
-  - override /loss: [mse, lpips]
+  - override /loss: []
 
 wandb:
   name: replica_sam_prompted
@@ -28,10 +28,11 @@ model:
     gaussian_feature_dim: 256
     freeze_backbone: true
     freeze_instill_qk: true
+    freeze_geometry_head: true
   decoder:
     make_scale_invariant: true
     decrease_lpf_step: 1000
-    feature_detach: false
+    feature_detach: true
 
 optimizer:
   lr: 1e-5
@@ -45,11 +46,11 @@ data_loader:
 train:
   context_view_loss: true
   prompt_mode: prompted
-  prompted_seg_loss_weight: 1.0
+  prompted_seg_loss_weight: 0.1
   prompt_strategy: centroid
   min_object_pixels: 16
   reproj_model: sam
-  feature_rendering_loss: 0.01
+  feature_rendering_loss: 1.0
   sam_model_variant: sam_vit_h
   sam_checkpoint: "./pretrained_weights/sam_vit_h.pth"
   use_lora: false

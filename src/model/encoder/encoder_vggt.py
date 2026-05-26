@@ -64,6 +64,7 @@ class EncoderVGGTCfg:
     pose_free: bool = True
     freeze_backbone: bool = False
     freeze_instill_qk: bool = False
+    freeze_geometry_head: bool = False
     decoder_depth: int = 2
     gaussians_per_token: int = 1
     gaussian_feature_dim: int = 0
@@ -149,6 +150,10 @@ class EncoderVGGT(Encoder[EncoderVGGTCfg]):
         self.gmae_to_gaussians = nn.Linear(
             transformer_dim, self.raw_gs_dim * cfg.gaussians_per_token
         )
+
+        if cfg.freeze_geometry_head:
+            freeze_all_params([self.gmae_to_gaussians])
+            self.gaussian_tokens.requires_grad = False
 
     def load_state_dict(self, state_dict, strict=True, **kwargs):
         state_dict = remap_instill_to_qkv_checkpoint(state_dict)
