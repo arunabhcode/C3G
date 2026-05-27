@@ -30,6 +30,7 @@ from pathlib import Path
 
 import cv2
 import torch
+from tqdm import tqdm
 
 # Ensure the project root is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -200,40 +201,35 @@ def process_scene(
     processed = 0
     skipped = 0
 
-    # Process in batches
-    batch_images: list[torch.Tensor] = []
-    batch_frame_ids: list[str] = []
+    for start in tqdm(
+        range(0, len(frames_to_process), batch_size),
+        desc=f"{scene_dir.name} batches",
+        unit="batch",
+    ):
+        batch_frame_ids = frames_to_process[start : start + batch_size]
+        batch_images: list[torch.Tensor] = []
+        readable_frame_ids: list[str] = []
 
-    for fid in frames_to_process:
-        image_path = scene_dir / f"{fid}_x.jpg"
-        image_tensor = load_frame_image(image_path)
+        for fid in batch_frame_ids:
+            image_path = scene_dir / f"{fid}_x.jpg"
+            image_tensor = load_frame_image(image_path)
 
-        if image_tensor is None:
-            logger.warning(f"Could not read {image_path}, skipping frame.")
-            skipped += 1
+            if image_tensor is None:
+                logger.warning(f"Could not read {image_path}, skipping frame.")
+                skipped += 1
+                continue
+
+            batch_images.append(image_tensor)
+            readable_frame_ids.append(fid)
+
+        if not batch_images:
             continue
 
-        batch_images.append(image_tensor)
-        batch_frame_ids.append(fid)
-
-        if len(batch_images) == batch_size:
-            embeddings = encode_batch(sam, torch.stack(batch_images), device)
-            for i, frame_id in enumerate(batch_frame_ids):
-                output_path = scene_dir / f"{frame_id}_sam.pt"
-                torch.save(embeddings[i], output_path)
-                processed += 1
-            batch_images.clear()
-            batch_frame_ids.clear()
-
-    # Process remaining frames in the last (partial) batch
-    if batch_images:
         embeddings = encode_batch(sam, torch.stack(batch_images), device)
-        for i, frame_id in enumerate(batch_frame_ids):
+        for i, frame_id in enumerate(readable_frame_ids):
             output_path = scene_dir / f"{frame_id}_sam.pt"
             torch.save(embeddings[i], output_path)
             processed += 1
-        batch_images.clear()
-        batch_frame_ids.clear()
 
     logger.info(
         f"Scene {scene_dir.name}: saved {processed} features, skipped {skipped} frames."
@@ -248,6 +244,9 @@ def main() -> None:
     )
 
     args = parse_args()
+
+    if args.batch_size <= 0:
+        raise ValueError("--batch-size must be greater than 0")
 
     # Validate dataset root
     if not args.dataset_root.is_dir():
