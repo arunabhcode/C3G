@@ -228,7 +228,7 @@ def process_scene(
         embeddings = encode_batch(sam, torch.stack(batch_images), device)
         for i, frame_id in enumerate(readable_frame_ids):
             output_path = scene_dir / f"{frame_id}_sam.pt"
-            torch.save(embeddings[i], output_path)
+            torch.save(embeddings[i].clone(), output_path)
             processed += 1
 
     logger.info(
@@ -267,6 +267,7 @@ def main() -> None:
         freeze=True,
     )
     sam = sam.to(device)
+    sam.eval()
     logger.info(f"SAM model loaded on {device}")
 
     # Process each scene
