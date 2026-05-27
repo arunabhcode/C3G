@@ -95,3 +95,9 @@ exclude = [
 ]
 per-file-ignores = {}
 
+[dependency-groups]
+dev = [
+    "hypothesis>=6.153.2",
+    "pytest>=9.0.3",
+]
+
