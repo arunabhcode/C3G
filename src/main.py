@@ -22,7 +22,10 @@ with install_import_hook(
     ("src",),
     ("beartype", "beartype"),
 ):
-    from src.config import load_typed_root_config, val_check_interval_in_training_batches
+    from src.config import (
+        load_typed_root_config,
+        val_check_interval_in_training_batches,
+    )
     from src.dataset.data_module import DataModule
     from src.global_cfg import set_cfg
     from src.loss import get_losses
@@ -32,6 +35,11 @@ with install_import_hook(
     from src.model.decoder import get_decoder
     from src.model.encoder import get_encoder
     from src.model.model_wrapper import ModelWrapper
+    from src.model.distillation_wrapper import (
+        DistillationModelWrapper,
+        DistillTrainCfg,
+        OptimizerCfg as DistillOptimizerCfg,
+    )
     from src.model.load_foundation_model import load_foundation_model
 
 
@@ -127,68 +135,130 @@ def train(cfg_dict: DictConfig):
     trainer = Trainer(**trainer_kwargs)
     torch.manual_seed(cfg_dict.seed + trainer.global_rank)
 
-    vggt, dino, lseg_feature_extractor, clip, sam_encoder, feature_dim = (
-        load_foundation_model(cfg)
-    )
-    cfg.model.encoder.feature_dim = (
-        feature_dim if cfg.train.feature_rendering_loss > 0 else 0
-    )
+    use_distillation = cfg.train.pipeline == "distillation"
 
-    encoder, encoder_visualizer = get_encoder(cfg.model.encoder)
+    if use_distillation:
+        cfg.model.encoder.feature_dim = cfg.model.encoder.gaussian_feature_dim
 
-    # Load the encoder weights.
-    if cfg.model.encoder.pretrained_weights and cfg.mode == "train":
-        weight_path = cfg.model.encoder.pretrained_weights
-        ckpt_weights = torch.load(weight_path, map_location="cpu")
-        if "model" in ckpt_weights:
-            ckpt_weights = ckpt_weights["model"]
-            ckpt_weights = checkpoint_filter_fn(ckpt_weights, encoder)
-            ckpt_weights = remap_instill_to_qkv_checkpoint(ckpt_weights)
-            missing_keys, unexpected_keys = encoder.load_state_dict(
-                ckpt_weights, strict=False
-            )
-        elif "state_dict" in ckpt_weights:
-            ckpt_weights = ckpt_weights["state_dict"]
-            ckpt_weights = {
-                k[8:]: v for k, v in ckpt_weights.items() if k.startswith("encoder.")
-            }
-            ckpt_weights = remap_instill_to_qkv_checkpoint(ckpt_weights)
-            missing_keys, unexpected_keys = encoder.load_state_dict(
-                ckpt_weights, strict=False
-            )
-        elif isinstance(ckpt_weights, dict):
-            new_ckpt = {}
-            for key, value in ckpt_weights.items():
-                if "aggregator" in key:
-                    new_ckpt[f"backbone.{key}"] = value
-                if "point_head" in key:
-                    new_ckpt[key.replace("point_head", "dpt_head")] = value
-            new_ckpt = remap_instill_to_qkv_checkpoint(new_ckpt)
-            missing_keys, unexpected_keys = encoder.load_state_dict(
-                new_ckpt, strict=False
-            )
-            del new_ckpt
-        else:
-            raise ValueError(f"Invalid checkpoint format: {weight_path}")
+        encoder, encoder_visualizer = get_encoder(cfg.model.encoder)
 
-        del ckpt_weights
+        if cfg.model.encoder.pretrained_weights and cfg.mode == "train":
+            weight_path = cfg.model.encoder.pretrained_weights
+            ckpt_weights = torch.load(weight_path, map_location="cpu")
+            if "model" in ckpt_weights:
+                ckpt_weights = ckpt_weights["model"]
+                ckpt_weights = checkpoint_filter_fn(ckpt_weights, encoder)
+                ckpt_weights = remap_instill_to_qkv_checkpoint(ckpt_weights)
+                missing_keys, unexpected_keys = encoder.load_state_dict(
+                    ckpt_weights, strict=False
+                )
+            elif "state_dict" in ckpt_weights:
+                ckpt_weights = ckpt_weights["state_dict"]
+                ckpt_weights = {
+                    k[8:]: v
+                    for k, v in ckpt_weights.items()
+                    if k.startswith("encoder.")
+                }
+                ckpt_weights = remap_instill_to_qkv_checkpoint(ckpt_weights)
+                missing_keys, unexpected_keys = encoder.load_state_dict(
+                    ckpt_weights, strict=False
+                )
+            elif isinstance(ckpt_weights, dict):
+                new_ckpt = {}
+                for key, value in ckpt_weights.items():
+                    if "aggregator" in key:
+                        new_ckpt[f"backbone.{key}"] = value
+                    if "point_head" in key:
+                        new_ckpt[key.replace("point_head", "dpt_head")] = value
+                new_ckpt = remap_instill_to_qkv_checkpoint(new_ckpt)
+                missing_keys, unexpected_keys = encoder.load_state_dict(
+                    new_ckpt, strict=False
+                )
+                del new_ckpt
+            else:
+                raise ValueError(f"Invalid checkpoint format: {weight_path}")
+            del ckpt_weights
 
-    model_wrapper = ModelWrapper(
-        cfg.optimizer,
-        cfg.test,
-        cfg.train,
-        encoder,
-        encoder_visualizer,
-        get_decoder(cfg.model.decoder),
-        get_losses(cfg.loss),
-        step_tracker,
-        vggt=vggt,
-        dino=dino,
-        clip=clip,
-        lseg_feature_extractor=lseg_feature_extractor,
-        sam_encoder=sam_encoder,
-        mode=cfg.mode,
-    )
+        distill_train_cfg = DistillTrainCfg(
+            feature_mse_loss_weight=cfg.train.feature_mse_loss_weight,
+            depth_mode=cfg.train.depth_mode,
+            context_view_loss=cfg.train.context_view_loss,
+        )
+        distill_optimizer_cfg = DistillOptimizerCfg(
+            lr=cfg.optimizer.lr,
+            warm_up_steps=cfg.optimizer.warm_up_steps,
+        )
+        model_wrapper = DistillationModelWrapper(
+            distill_optimizer_cfg,
+            distill_train_cfg,
+            encoder,
+            get_decoder(cfg.model.decoder),
+            get_losses(cfg.loss),
+            step_tracker,
+        )
+    else:
+        vggt, dino, lseg_feature_extractor, clip, sam_encoder, feature_dim = (
+            load_foundation_model(cfg)
+        )
+        cfg.model.encoder.feature_dim = (
+            feature_dim if cfg.train.feature_rendering_loss > 0 else 0
+        )
+
+        encoder, encoder_visualizer = get_encoder(cfg.model.encoder)
+
+        if cfg.model.encoder.pretrained_weights and cfg.mode == "train":
+            weight_path = cfg.model.encoder.pretrained_weights
+            ckpt_weights = torch.load(weight_path, map_location="cpu")
+            if "model" in ckpt_weights:
+                ckpt_weights = ckpt_weights["model"]
+                ckpt_weights = checkpoint_filter_fn(ckpt_weights, encoder)
+                ckpt_weights = remap_instill_to_qkv_checkpoint(ckpt_weights)
+                missing_keys, unexpected_keys = encoder.load_state_dict(
+                    ckpt_weights, strict=False
+                )
+            elif "state_dict" in ckpt_weights:
+                ckpt_weights = ckpt_weights["state_dict"]
+                ckpt_weights = {
+                    k[8:]: v
+                    for k, v in ckpt_weights.items()
+                    if k.startswith("encoder.")
+                }
+                ckpt_weights = remap_instill_to_qkv_checkpoint(ckpt_weights)
+                missing_keys, unexpected_keys = encoder.load_state_dict(
+                    ckpt_weights, strict=False
+                )
+            elif isinstance(ckpt_weights, dict):
+                new_ckpt = {}
+                for key, value in ckpt_weights.items():
+                    if "aggregator" in key:
+                        new_ckpt[f"backbone.{key}"] = value
+                    if "point_head" in key:
+                        new_ckpt[key.replace("point_head", "dpt_head")] = value
+                new_ckpt = remap_instill_to_qkv_checkpoint(new_ckpt)
+                missing_keys, unexpected_keys = encoder.load_state_dict(
+                    new_ckpt, strict=False
+                )
+                del new_ckpt
+            else:
+                raise ValueError(f"Invalid checkpoint format: {weight_path}")
+            del ckpt_weights
+
+        model_wrapper = ModelWrapper(
+            cfg.optimizer,
+            cfg.test,
+            cfg.train,
+            encoder,
+            encoder_visualizer,
+            get_decoder(cfg.model.decoder),
+            get_losses(cfg.loss),
+            step_tracker,
+            vggt=vggt,
+            dino=dino,
+            clip=clip,
+            lseg_feature_extractor=lseg_feature_extractor,
+            sam_encoder=sam_encoder,
+            mode=cfg.mode,
+        )
     data_module = DataModule(
         cfg.dataset,
         cfg.data_loader,

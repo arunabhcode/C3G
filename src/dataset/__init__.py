@@ -9,6 +9,11 @@ from .dataset_replica_2dseg import (
     Replica2dSegCfg,
     DatasetReplica2dSegCfgWrapper,
 )
+from .dataset_replica_distill import (
+    DatasetReplicaDistill,
+    ReplicaDistillCfg,
+    DatasetReplicaDistillCfgWrapper,
+)
 from .dataset_replica_semseg import (
     DatasetReplicaSemSeg,
     ReplicaSemSegCfg,
@@ -28,6 +33,11 @@ from .dataset_scannet_2dseg import (
     Scannet2dSegCfg,
     DatasetScannet2dSegCfgWrapper,
 )
+from .dataset_scannet_distill import (
+    DatasetScannetDistill,
+    ScannetDistillCfg,
+    DatasetScannetDistillCfgWrapper,
+)
 from .dataset_replica import DatasetReplica, ReplicaCfg, DatasetReplicaCfgWrapper
 from .dataset_lerf_mask import (
     DatasetLerfMask,
@@ -44,8 +54,10 @@ DATASETS: dict[str, Dataset] = {
     "scannet_pose": DatasetScannetPose,
     "scannet": DatasetScannet,
     "scannet_2dseg": DatasetScannet2dSeg,
+    "scannet_distill": DatasetScannetDistill,
     "replica": DatasetReplica,
     "replica_2dseg": DatasetReplica2dSeg,
+    "replica_distill": DatasetReplicaDistill,
     "replica_semseg": DatasetReplicaSemSeg,
     "lerf_mask": DatasetLerfMask,
 }
@@ -58,8 +70,10 @@ DatasetCfgWrapper = (
     | DatasetScannetPoseCfgWrapper
     | DatasetScannetCfgWrapper
     | DatasetScannet2dSegCfgWrapper
+    | DatasetScannetDistillCfgWrapper
     | DatasetReplicaCfgWrapper
     | DatasetReplica2dSegCfgWrapper
+    | DatasetReplicaDistillCfgWrapper
     | DatasetReplicaSemSegCfgWrapper
     | DatasetLerfMaskCfgWrapper
 )
@@ -67,8 +81,10 @@ DatasetCfg = (
     DatasetRE10kCfg
     | ScannetCfg
     | Scannet2dSegCfg
+    | ScannetDistillCfg
     | ReplicaCfg
     | Replica2dSegCfg
+    | ReplicaDistillCfg
     | ReplicaSemSegCfg
     | LerfMaskCfg
 )

@@ -43,6 +43,7 @@ data_loader:
     batch_size: 4
 
 train:
+  pipeline: distillation
   feature_mse_loss_weight: 1.0
   context_view_loss: true
 

@@ -137,6 +137,8 @@ class TrainCfg:
     prompted_seg_loss_weight: float = 1.0
     prompt_strategy: str = "centroid"
     min_object_pixels: int = 16
+    context_view_loss: bool = True
+    pipeline: str = "full"
 
 
 @runtime_checkable
