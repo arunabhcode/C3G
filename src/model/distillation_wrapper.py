@@ -28,7 +28,6 @@ class DistillTrainCfg:
 class OptimizerCfg:
     lr: float
     warm_up_steps: int
-    backbone_lr_multiplier: float
 
 
 class DistillationModelWrapper(LightningModule):
@@ -219,24 +218,10 @@ class DistillationModelWrapper(LightningModule):
         )
 
     def configure_optimizers(self):
-        new_params, pretrained_params = [], []
-        for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
-            if "gmae" in name or "gaussian_param_head" in name:
-                new_params.append(param)
-            else:
-                pretrained_params.append(param)
+        params = [p for p in self.parameters() if p.requires_grad]
 
-        param_dicts = [
-            {"params": new_params, "lr": self.optimizer_cfg.lr},
-            {
-                "params": pretrained_params,
-                "lr": self.optimizer_cfg.lr * self.optimizer_cfg.backbone_lr_multiplier,
-            },
-        ]
         optimizer = torch.optim.AdamW(
-            param_dicts, lr=self.optimizer_cfg.lr, weight_decay=0.05, betas=(0.9, 0.95)
+            params, lr=self.optimizer_cfg.lr, weight_decay=0.05, betas=(0.9, 0.95)
         )
 
         warm_up_steps = self.optimizer_cfg.warm_up_steps
