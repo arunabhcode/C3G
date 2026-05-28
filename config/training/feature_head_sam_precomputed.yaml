@@ -1,14 +1,17 @@
 # @package _global_
 
 defaults:
-  - /dataset@_group_.replica_distill: replica_distill
+  - /dataset@_group_.scannet_distill: scannet_distill
   - override /model/encoder: noposplat
   - override /model/encoder/backbone: croco
   - override /loss: []
 
 wandb:
-  name: replica_sam_precomputed
-  tags: [replica, 252x252, sam, precomputed, distillation]
+  mode: online
+  entity: vrshy-stanford
+  project: distillation-training
+  name: sam_distill_scannet_scene000019
+  tags: [scannet, 252x252, sam, precomputed, distillation]
 
 model:
   encoder:

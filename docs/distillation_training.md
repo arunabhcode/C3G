@@ -112,23 +112,20 @@ datasets/replica/
 ## Step 2: Run Distillation Training
 
 ```bash
-uv run python -m src.main +training=feature_head_sam_precomputed \
-    wandb.mode=online wandb.name="sam_distill_replica"
+uv run python -m src.main +training=feature_head_sam_precomputed_replica
 ```
 
 To override the dataset root:
 
 ```bash
-uv run python -m src.main +training=feature_head_sam_precomputed \
-    wandb.mode=online \
-    wandb.name="sam_distill_replica" \
+uv run python -m src.main +training=feature_head_sam_precomputed_replica \
     dataset.replica_distill.roots="[/path/to/replica]"
 ```
 
 To disable wandb logging:
 
 ```bash
-uv run python -m src.main +training=feature_head_sam_precomputed wandb.mode=disabled
+uv run python -m src.main +training=feature_head_sam_precomputed_replica wandb.mode=disabled
 ```
 
 ### Key Training Parameters
@@ -160,9 +157,8 @@ Only the feature head and decoder feature rendering path receive gradients.
 Run evaluation on a trained checkpoint:
 
 ```bash
-uv run python -m src.main +training=feature_head_sam_precomputed \
+uv run python -m src.main +training=feature_head_sam_precomputed_replica \
     mode=test \
-    wandb.mode=online \
     wandb.name="sam_distill_eval" \
     checkpointing.load="path/to/checkpoint.ckpt"
 ```
@@ -206,4 +202,4 @@ When `wandb.mode=online`, the following metrics are logged:
 | Training speed          | Slower (live SAM forward pass)       | Faster (features loaded from disk)   |
 | Disk usage              | Lower                                | Higher (`.pt` files per frame)       |
 | Supervision signal      | Prompted segmentation masks          | Dense encoder features               |
-| Config                  | `feature_head_sam_prompted`          | `feature_head_sam_precomputed`       |
+| Config                  | `feature_head_sam_prompted`          | `feature_head_sam_precomputed_replica` |
