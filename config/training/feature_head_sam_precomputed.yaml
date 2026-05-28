@@ -6,6 +6,8 @@ defaults:
   - override /model/encoder/backbone: croco
   - override /loss: []
 
+loss: {}
+
 wandb:
   mode: online
   entity: vrshy-stanford

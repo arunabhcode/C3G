@@ -6,6 +6,8 @@ defaults:
   - override /model/encoder/backbone: croco
   - override /loss: []
 
+loss: {}
+
 wandb:
   name: replica_sam_prompted
   tags: [replica, 252x252, sam, prompted]
