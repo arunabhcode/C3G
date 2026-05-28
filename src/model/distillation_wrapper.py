@@ -51,6 +51,28 @@ class DistillationModelWrapper(LightningModule):
         self.data_shim = get_data_shim(self.encoder)
         self.losses = nn.ModuleList(losses)
 
+    def _downsample_for_encoder(self, sam_features, h, w):
+        """Downsample SAM features from 64x64 to patch resolution for the encoder.
+
+        The InstillTransformer requires the context_feature sequence length to
+        match the backbone patch-token sequence length.  The backbone produces
+        (H/patch_size)*(W/patch_size) tokens per view, while raw SAM features
+        have 64*64 = 4096 tokens per view.  We bilinearly interpolate to bridge
+        this gap (same as the live-SAM pipeline does in
+        ModelWrapper.forward_foundation_model with ``interpolate=True``).
+        """
+        b, v, c, fh, fw = sam_features.shape
+        patch_size = self.encoder.patch_size
+        patch_h = h // patch_size
+        patch_w = w // patch_size
+        if fh == patch_h and fw == patch_w:
+            return sam_features
+        flat = rearrange(sam_features, "b v c h w -> (b v) c h w")
+        flat = F.interpolate(
+            flat, size=(patch_h, patch_w), mode="bilinear", align_corners=False
+        )
+        return rearrange(flat, "(b v) c h w -> b v c h w", b=b, v=v)
+
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
         _, _, _, h, w = batch["target"]["image"].shape
@@ -58,10 +80,14 @@ class DistillationModelWrapper(LightningModule):
         context_sam = batch["context"]["sam_features"]
         target_sam = batch["target"]["sam_features"]
 
+        # Downsample context features to patch resolution for the encoder.
+        # Loss targets remain at full 64x64 SAM resolution.
+        context_sam_enc = self._downsample_for_encoder(context_sam, h, w)
+
         gaussians = self.encoder(
             batch["context"],
             self.global_step,
-            context_feature=context_sam,
+            context_feature=context_sam_enc,
         )
 
         gaussians_detached = Gaussians(
@@ -172,10 +198,12 @@ class DistillationModelWrapper(LightningModule):
         context_sam = batch["context"]["sam_features"]
         target_sam = batch["target"]["sam_features"]
 
+        context_sam_enc = self._downsample_for_encoder(context_sam, h, w)
+
         gaussians = self.encoder(
             batch["context"],
             self.global_step,
-            context_feature=context_sam,
+            context_feature=context_sam_enc,
         )
 
         gaussians_detached = Gaussians(

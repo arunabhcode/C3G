@@ -138,6 +138,7 @@ class TrainCfg:
     prompt_strategy: str = "centroid"
     min_object_pixels: int = 16
     context_view_loss: bool = True
+    feature_mse_loss_weight: float = 1.0
     pipeline: str = "full"
 
 
