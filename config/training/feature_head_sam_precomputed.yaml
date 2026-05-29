@@ -54,8 +54,8 @@ train:
   pipeline: distillation
   feature_mse_loss_weight: 1.0
   feature_cosine_loss_weight: 1.0
-  feature_norm_loss_weight: 0.4
-  feature_variance_loss_weight: 4000.0
+  feature_norm_loss_weight: 0.0
+  feature_variance_loss_weight: 0.0
   context_view_loss: true
 
 trainer:
