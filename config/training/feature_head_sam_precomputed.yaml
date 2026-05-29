@@ -43,6 +43,8 @@ model:
 optimizer:
   lr: 1e-4
   warm_up_steps: 1000
+  weight_decay: 0.05
+  feature_head_weight_decay: 0.01
 
 data_loader:
   train:
