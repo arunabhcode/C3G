@@ -33,7 +33,7 @@ model:
     gaussian_feature_dim: 256
     different_learnable_tokens: false
     freeze_backbone: true
-    freeze_instill_qk: true
+    freeze_instill_qk: false
     freeze_geometry_head: true
   decoder:
     make_scale_invariant: true

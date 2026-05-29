@@ -17,8 +17,15 @@ def log_debug_visualizations(
     rendered_feature,
     img_size,
     prefix="val",
+    valid_region=None,
 ):
-    """Log debug visualization table and feature norm stats to wandb."""
+    """Log debug visualization table and feature norm stats to wandb.
+
+    SAM features live in a padded-square embedding grid where only the
+    top-left ``valid_region`` holds real content; the rest is zero padding.
+    Crop to that region before PCA / heatmaps so the overlay aligns with the
+    (full-frame) RGB image instead of being squashed against the padding seam.
+    """
     if global_step % checkpoint_interval != 0:
         return
     if not isinstance(logger, WandbLogger):
@@ -28,6 +35,11 @@ def log_debug_visualizations(
 
     h, w = img_size
     target_rgb_norm = inverse_normalize(target_rgb)
+
+    if valid_region is not None:
+        valid_h, valid_w = valid_region
+        target_sam_feature = target_sam_feature[:, :valid_h, :valid_w]
+        rendered_feature = rendered_feature[:, :valid_h, :valid_w]
 
     target_pca = run_pca(target_sam_feature.unsqueeze(0), (h, w))
     rendered_pca = run_pca(rendered_feature.unsqueeze(0), (h, w))
@@ -161,30 +173,21 @@ def compute_feature_norms(feature):
     return feature.norm(dim=0).flatten()
 
 
-def crop_sam_masks(masks, embeddings):
+def crop_masks_to_valid(masks, embed_size, valid_region):
     """Crop SAM decoder masks to the valid (non-padded) region.
 
     SAM features are computed from images padded to 1024x1024. The mask decoder
-    outputs (B, N, 256, 256) masks in that padded space. We detect the valid
-    region from the input embeddings (C, 64, 64) by finding where rows/cols
-    are all zeros (padding), then scale to the 256x256 mask space.
+    outputs (B, N, 256, 256) masks in that padded space. ``valid_region`` is the
+    valid extent in the ``embed_size`` (e.g. 64x64) embedding grid, which we
+    scale into the 256x256 mask space. This is applied to both the SAM and the
+    rendered masks so they stay consistent (the rendered embeddings have no zero
+    padding to auto-detect, so an explicit region is required).
     """
     _, _, mask_h, mask_w = masks.shape
-    c, fh, fw = embeddings.shape
+    valid_h, valid_w = valid_region
 
-    row_norms = embeddings.abs().sum(dim=0).sum(dim=1)
-    col_norms = embeddings.abs().sum(dim=0).sum(dim=0)
-
-    valid_rows = (row_norms > 0).sum().item()
-    valid_cols = (col_norms > 0).sum().item()
-
-    if valid_rows == 0:
-        valid_rows = fh
-    if valid_cols == 0:
-        valid_cols = fw
-
-    crop_h = int(round(valid_rows / fh * mask_h))
-    crop_w = int(round(valid_cols / fw * mask_w))
+    crop_h = int(round(valid_h / embed_size * mask_h))
+    crop_w = int(round(valid_w / embed_size * mask_w))
     crop_h = min(crop_h, mask_h)
     crop_w = min(crop_w, mask_w)
 
@@ -203,8 +206,14 @@ def log_decoder_debug(
     target_rgb,
     img_size,
     prefix="train",
+    valid_region=None,
 ):
-    """Run SAM decoder on both SAM and rendered embeddings, log masks to wandb table."""
+    """Run SAM decoder on both SAM and rendered embeddings, log masks to wandb table.
+
+    The decoder operates on the full padded-square (64x64) embeddings, as SAM
+    expects, but its output masks are cropped to ``valid_region`` so they align
+    with the full-frame RGB image.
+    """
     if global_step % checkpoint_interval != 0:
         return
     if not isinstance(logger, WandbLogger):
@@ -215,24 +224,34 @@ def log_decoder_debug(
     h, w = img_size
     target_rgb_norm = inverse_normalize(target_rgb)
 
+    embed_size = 64
     with torch.no_grad():
         sam_input = target_sam_feature.unsqueeze(0)
         rendered_input = rendered_feature.unsqueeze(0)
 
-        if sam_input.shape[-2:] != (64, 64):
+        if sam_input.shape[-2:] != (embed_size, embed_size):
             sam_input = F.interpolate(
-                sam_input, size=(64, 64), mode="bilinear", align_corners=False
+                sam_input,
+                size=(embed_size, embed_size),
+                mode="bilinear",
+                align_corners=False,
             )
-        if rendered_input.shape[-2:] != (64, 64):
+        if rendered_input.shape[-2:] != (embed_size, embed_size):
             rendered_input = F.interpolate(
-                rendered_input, size=(64, 64), mode="bilinear", align_corners=False
+                rendered_input,
+                size=(embed_size, embed_size),
+                mode="bilinear",
+                align_corners=False,
             )
 
         sam_masks = sam_decoder(sam_input)
         rendered_masks = sam_decoder(rendered_input)
 
-        sam_masks = crop_sam_masks(sam_masks, target_sam_feature)
-        rendered_masks = crop_sam_masks(rendered_masks, rendered_feature)
+        if valid_region is not None:
+            sam_masks = crop_masks_to_valid(sam_masks, embed_size, valid_region)
+            rendered_masks = crop_masks_to_valid(
+                rendered_masks, embed_size, valid_region
+            )
 
     num_masks = sam_masks.shape[1]
     columns = ["target_rgb", "sam_masks_overlay", "rendered_masks_overlay"]

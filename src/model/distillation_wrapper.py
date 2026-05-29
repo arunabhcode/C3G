@@ -302,6 +302,7 @@ class DistillationModelWrapper(LightningModule):
                 rendered_interp[0, 0].detach().float(),
                 (h, w),
                 prefix="train",
+                valid_region=(valid_h, valid_w),
             )
             log_decoder_debug(
                 self.logger,
@@ -313,6 +314,7 @@ class DistillationModelWrapper(LightningModule):
                 batch["target"]["image"][0, 0].detach().float(),
                 (h, w),
                 prefix="train",
+                valid_region=(valid_h, valid_w),
             )
             print(
                 f"train step {self.global_step} finished; "
@@ -402,6 +404,7 @@ class DistillationModelWrapper(LightningModule):
                 target_sam[0, 0],
                 rendered_interp[0, 0],
                 (h, w),
+                valid_region=(valid_h, valid_w),
             )
             log_decoder_debug(
                 self.logger,
@@ -413,6 +416,7 @@ class DistillationModelWrapper(LightningModule):
                 batch["target"]["image"][0, 0].detach().float(),
                 (h, w),
                 prefix="val",
+                valid_region=(valid_h, valid_w),
             )
 
     def configure_optimizers(self):
