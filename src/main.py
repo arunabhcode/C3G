@@ -188,6 +188,10 @@ def train(cfg_dict: DictConfig):
         distill_optimizer_cfg = DistillOptimizerCfg(
             lr=cfg.optimizer.lr,
             warm_up_steps=cfg.optimizer.warm_up_steps,
+            weight_decay=cfg_dict.optimizer.get("weight_decay", 0.05),
+            feature_head_weight_decay=cfg_dict.optimizer.get(
+                "feature_head_weight_decay", 0.01
+            ),
         )
 
         debug_decoder_cfg = None

@@ -37,6 +37,8 @@ class DebugDecoderCfg:
 class OptimizerCfg:
     lr: float
     warm_up_steps: int
+    weight_decay: float = 0.05
+    feature_head_weight_decay: float = 0.01
 
 
 class DistillationModelWrapper(LightningModule):
@@ -331,10 +333,44 @@ class DistillationModelWrapper(LightningModule):
             )
 
     def configure_optimizers(self):
-        params = [p for p in self.parameters() if p.requires_grad]
+        no_decay_keywords = ("bias", "LayerNorm", "layernorm", "layer_norm", "ln")
+        feature_head_keyword = "feature_gmae_to_gaussians"
+
+        decay_params = []
+        no_decay_params = []
+        feature_head_decay_params = []
+        feature_head_no_decay_params = []
+
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            is_feature_head = feature_head_keyword in name
+            is_no_decay = any(kw in name for kw in no_decay_keywords)
+
+            if is_feature_head:
+                if is_no_decay:
+                    feature_head_no_decay_params.append(param)
+                else:
+                    feature_head_decay_params.append(param)
+            else:
+                if is_no_decay:
+                    no_decay_params.append(param)
+                else:
+                    decay_params.append(param)
+
+        param_groups = [
+            {"params": decay_params, "weight_decay": self.optimizer_cfg.weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
+            {
+                "params": feature_head_decay_params,
+                "weight_decay": self.optimizer_cfg.feature_head_weight_decay,
+            },
+            {"params": feature_head_no_decay_params, "weight_decay": 0.0},
+        ]
+        param_groups = [g for g in param_groups if len(g["params"]) > 0]
 
         optimizer = torch.optim.AdamW(
-            params, lr=self.optimizer_cfg.lr, weight_decay=0.05, betas=(0.9, 0.95)
+            param_groups, lr=self.optimizer_cfg.lr, betas=(0.9, 0.95)
         )
 
         warm_up_steps = self.optimizer_cfg.warm_up_steps
