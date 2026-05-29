@@ -18,9 +18,45 @@ from .encoder.encoder_vggt import EncoderVGGT
 from .types import Gaussians
 
 
+def compute_feature_losses(rendered, target, eps: float = 1e-8):
+    """Decoupled direction / magnitude / spread feature losses.
+
+    Pure MSE minimises ``||r - t||^2`` whose optimal magnitude is ``||t|| cos(theta)``,
+    so direction uncertainty leaks into magnitude and shrinks ``||r||`` below the
+    target. Splitting the objective lets each term own one statistic:
+
+    * ``cosine_loss`` (``1 - cos theta``) fixes per-position direction (scale free).
+    * ``norm_loss`` (``(||r|| - ||t||)^2``) restores the SAM-calibrated per-position
+      magnitude the frozen decoder expects.
+    * ``variance_loss`` matches each channel's standard deviation *across spatial
+      positions*, penalising the over-smoothed / low-variance prediction that MSE
+      regression-to-mean produces (i.e. spatial collapse).
+
+    Both inputs are ``(b, v, c, h, w)``; losses are reduced over all positions.
+    """
+    rendered_norm = rendered.norm(dim=2, keepdim=True)
+    target_norm = target.norm(dim=2, keepdim=True)
+
+    cosine_sim = (
+        (rendered / rendered_norm.clamp(min=eps))
+        * (target / target_norm.clamp(min=eps))
+    ).sum(dim=2)
+    cosine_loss = (1.0 - cosine_sim).mean()
+    norm_loss = (rendered_norm - target_norm).pow(2).mean()
+
+    rendered_std = rendered.flatten(3).std(dim=3)
+    target_std = target.flatten(3).std(dim=3)
+    variance_loss = (rendered_std - target_std).pow(2).mean()
+
+    return cosine_loss, norm_loss, variance_loss
+
+
 @dataclass
 class DistillTrainCfg:
     feature_mse_loss_weight: float = 1.0
+    feature_cosine_loss_weight: float = 1.0
+    feature_norm_loss_weight: float = 0.2
+    feature_variance_loss_weight: float = 0.4
     depth_mode: DepthRenderingMode | None = None
     context_view_loss: bool = True
     random_select_context_view: bool = False
@@ -188,17 +224,35 @@ class DistillationModelWrapper(LightningModule):
         valid_h, valid_w = self._get_valid_region(all_sam)
         rendered_crop = rendered_interp[:, :, :, :valid_h, :valid_w]
         target_crop = all_sam[:, :, :, :valid_h, :valid_w]
-        feature_mse_loss = F.mse_loss(rendered_crop, target_crop)
-        total_loss = self.train_cfg.feature_mse_loss_weight * feature_mse_loss
 
-        self.log(
-            "loss/feature_mse",
-            feature_mse_loss,
-            on_step=True,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
+        feature_mse_loss = F.mse_loss(rendered_crop, target_crop)
+        (
+            feature_cosine_loss,
+            feature_norm_loss,
+            feature_variance_loss,
+        ) = compute_feature_losses(rendered_crop, target_crop)
+
+        total_loss = (
+            self.train_cfg.feature_mse_loss_weight * feature_mse_loss
+            + self.train_cfg.feature_cosine_loss_weight * feature_cosine_loss
+            + self.train_cfg.feature_norm_loss_weight * feature_norm_loss
+            + self.train_cfg.feature_variance_loss_weight * feature_variance_loss
         )
+
+        for loss_name, loss_value in (
+            ("loss/feature_mse", feature_mse_loss),
+            ("loss/feature_cosine", feature_cosine_loss),
+            ("loss/feature_norm", feature_norm_loss),
+            ("loss/feature_variance", feature_variance_loss),
+        ):
+            self.log(
+                loss_name,
+                loss_value,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+            )
 
         if self.train_cfg.context_view_loss:
             target_gt = torch.cat(
@@ -263,7 +317,10 @@ class DistillationModelWrapper(LightningModule):
             print(
                 f"train step {self.global_step} finished; "
                 f"loss = {total_loss.detach().item():.6f}; "
-                f"feature_mse = {feature_mse_loss.detach().item():.6f}",
+                f"feature_mse = {feature_mse_loss.detach().item():.6f}; "
+                f"feature_cosine = {feature_cosine_loss.detach().item():.6f}; "
+                f"feature_norm = {feature_norm_loss.detach().item():.6f}; "
+                f"feature_variance = {feature_variance_loss.detach().item():.6f}",
                 flush=True,
             )
 
@@ -315,16 +372,26 @@ class DistillationModelWrapper(LightningModule):
         valid_h, valid_w = self._get_valid_region(target_sam)
         rendered_crop = rendered_interp[:, :, :, :valid_h, :valid_w]
         target_crop = target_sam[:, :, :, :valid_h, :valid_w]
+
         val_mse = F.mse_loss(rendered_crop, target_crop)
-        self.log(
-            "val/feature_mse",
-            val_mse,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            sync_dist=True,
+        val_cosine, val_norm, val_variance = compute_feature_losses(
+            rendered_crop, target_crop
         )
+        for loss_name, loss_value in (
+            ("val/feature_mse", val_mse),
+            ("val/feature_cosine", val_cosine),
+            ("val/feature_norm", val_norm),
+            ("val/feature_variance", val_variance),
+        ):
+            self.log(
+                loss_name,
+                loss_value,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
 
         if self.global_rank == 0:
             log_debug_visualizations(
