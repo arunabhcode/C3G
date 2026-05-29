@@ -24,6 +24,7 @@ class DistillTrainCfg:
     depth_mode: DepthRenderingMode | None = None
     context_view_loss: bool = True
     random_select_context_view: bool = False
+    original_image_shape: tuple[int, int] = (480, 640)
 
 
 @dataclass
@@ -108,6 +109,15 @@ class DistillationModelWrapper(LightningModule):
         )
         return rearrange(flat, "(b v) c h w -> b v c h w", b=b, v=v)
 
+    def _get_valid_region(self, sam_features):
+        """Return valid (non-padding) region size in the 64x64 SAM embedding space."""
+        orig_h, orig_w = self.train_cfg.original_image_shape
+        longest = max(orig_h, orig_w)
+        embed_size = sam_features.shape[-1]
+        valid_h = int(round(orig_h / longest * embed_size))
+        valid_w = int(round(orig_w / longest * embed_size))
+        return valid_h, valid_w
+
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
         _, _, _, h, w = batch["target"]["image"].shape
@@ -175,7 +185,10 @@ class DistillationModelWrapper(LightningModule):
             rendered_interp, "(b v) c h w -> b v c h w", b=b, v=v_total
         )
 
-        feature_mse_loss = F.mse_loss(rendered_interp, all_sam)
+        valid_h, valid_w = self._get_valid_region(all_sam)
+        rendered_crop = rendered_interp[:, :, :, :valid_h, :valid_w]
+        target_crop = all_sam[:, :, :, :valid_h, :valid_w]
+        feature_mse_loss = F.mse_loss(rendered_crop, target_crop)
         total_loss = self.train_cfg.feature_mse_loss_weight * feature_mse_loss
 
         self.log(
@@ -299,7 +312,10 @@ class DistillationModelWrapper(LightningModule):
             rendered_interp, "(b v) c h w -> b v c h w", b=b, v=v
         )
 
-        val_mse = F.mse_loss(rendered_interp, target_sam)
+        valid_h, valid_w = self._get_valid_region(target_sam)
+        rendered_crop = rendered_interp[:, :, :, :valid_h, :valid_w]
+        target_crop = target_sam[:, :, :, :valid_h, :valid_w]
+        val_mse = F.mse_loss(rendered_crop, target_crop)
         self.log(
             "val/feature_mse",
             val_mse,
