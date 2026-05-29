@@ -58,6 +58,11 @@ trainer:
   val_check_interval: 500
   accumulate_grad_batches: 2
 
+debug_decoder:
+  enabled: false
+  sam_checkpoint: "./pretrained_weights/sam_vit_h.pth"
+  sam_model_variant: sam_vit_h
+
 checkpointing:
   every_n_train_steps: 50
   save_top_k: 2
