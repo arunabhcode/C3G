@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 from lightning.pytorch import LightningModule
+from lightning.pytorch.utilities import rank_zero_only
 from torch import nn
 
 from ..dataset.data_module import get_data_shim
@@ -12,6 +13,7 @@ from ..global_cfg import get_cfg
 from ..loss import Loss
 from ..misc.step_tracker import StepTracker
 from .decoder.decoder import Decoder, DepthRenderingMode
+from .debug_visualizer import log_debug_visualizations
 from .encoder.encoder_vggt import EncoderVGGT
 from .types import Gaussians
 
@@ -50,6 +52,17 @@ class DistillationModelWrapper(LightningModule):
         self.decoder = decoder
         self.data_shim = get_data_shim(self.encoder)
         self.losses = nn.ModuleList(losses)
+
+    @rank_zero_only
+    def on_train_start(self) -> None:
+        accum = self.trainer.accumulate_grad_batches or 1
+        print(
+            "Distillation training started: "
+            f"max_steps={self.trainer.max_steps}, "
+            f"accumulate_grad_batches={accum}, "
+            f"log_every_n_steps={self.trainer.log_every_n_steps}",
+            flush=True,
+        )
 
     def _downsample_for_encoder(self, sam_features, h, w):
         """Downsample SAM features from 64x64 to patch resolution for the encoder.
@@ -189,6 +202,15 @@ class DistillationModelWrapper(LightningModule):
         if self.step_tracker is not None:
             self.step_tracker.set_step(self.global_step)
 
+        accum = self.trainer.accumulate_grad_batches or 1
+        if self.global_rank == 0 and (batch_idx + 1) % accum == 0:
+            print(
+                f"train step {self.global_step} finished; "
+                f"loss = {total_loss.detach().item():.6f}; "
+                f"feature_mse = {feature_mse_loss.detach().item():.6f}",
+                flush=True,
+            )
+
         return total_loss
 
     def validation_step(self, batch, batch_idx):
@@ -244,6 +266,17 @@ class DistillationModelWrapper(LightningModule):
             logger=True,
             sync_dist=True,
         )
+
+        if self.global_rank == 0:
+            log_debug_visualizations(
+                self.logger,
+                self.global_step,
+                get_cfg()["checkpointing"]["every_n_train_steps"],
+                batch["target"]["image"][0, 0],
+                target_sam[0, 0],
+                rendered_interp[0, 0],
+                (h, w),
+            )
 
     def configure_optimizers(self):
         params = [p for p in self.parameters() if p.requires_grad]

@@ -58,7 +58,6 @@ from .encoder import Encoder
 from .encoder.visualization.encoder_visualizer import EncoderVisualizer
 from .types import Gaussians
 from .utils import save_segmap, run_pca
-from .debug_visualizer import log_debug_visualizations
 from ..loss.loss_segmentation_prompted import (
     LossSegmentationPrompted,
     LossSegmentationPromptedCfg,
@@ -1660,17 +1659,6 @@ class ModelWrapper(LightningModule):
                 [prep_image(add_border(comparison))],
                 step=self.global_step,
                 caption=batch["scene"],
-            )
-
-            CN = batch["context"]["image"].shape[1]
-            log_debug_visualizations(
-                self.logger,
-                self.global_step,
-                get_cfg()["checkpointing"]["every_n_train_steps"],
-                batch["target"]["image"][0, 0],
-                foundation_feature[0, CN],
-                output.feature[0, 0],
-                (h, w),
             )
 
         # Render projections and construct projection image.

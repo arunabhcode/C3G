@@ -12,7 +12,7 @@ wandb:
   mode: online
   entity: vrshy-stanford
   project: distillation-training
-  name: sam_distill_scannet_scene000019
+  name: sam_distill_scannet_scene
   tags: [scannet, 252x252, sam, precomputed, distillation]
 
 model:
@@ -40,7 +40,7 @@ model:
     feature_detach: true
 
 optimizer:
-  lr: 1e-5
+  lr: 1e-4
   warm_up_steps: 1000
 
 data_loader:

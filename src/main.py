@@ -123,7 +123,7 @@ def train(cfg_dict: DictConfig):
             cfg.trainer.accumulate_grad_batches,
         ),
         check_val_every_n_epoch=None,
-        enable_progress_bar=False,
+        enable_progress_bar=True,
         gradient_clip_val=cfg.trainer.gradient_clip_val,
         max_steps=cfg.trainer.max_steps,
         inference_mode=False if (cfg.mode == "test" and cfg.test.align_pose) else True,
