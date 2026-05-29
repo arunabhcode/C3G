@@ -77,7 +77,7 @@ def log_debug_visualizations(
         wandb.Image(to_hwc_uint8(mse_overlay)),
         wandb.Image(to_hwc_uint8(cosine_overlay)),
     )
-    logger.experiment.log({"val/debug_visualizations": table}, step=global_step)
+    logger.experiment.log({"val/debug_visualizations": table})
 
     target_norms = compute_feature_norms(target_sam_feature)
     rendered_norms = compute_feature_norms(rendered_feature)
@@ -90,7 +90,6 @@ def log_debug_visualizations(
             "val/target_feature_norms": wandb.Histogram(target_norms_np),
             "val/rendered_feature_norms": wandb.Histogram(rendered_norms_np),
         },
-        step=global_step,
     )
 
     stats_table = wandb.Table(
@@ -112,10 +111,7 @@ def log_debug_visualizations(
             ],
         ],
     )
-    logger.experiment.log(
-        {"val/feature_norm_stats": stats_table},
-        step=global_step,
-    )
+    logger.experiment.log({"val/feature_norm_stats": stats_table})
 
 
 def to_hwc_uint8(tensor):
