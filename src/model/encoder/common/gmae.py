@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from einops import rearrange
 
@@ -137,23 +138,28 @@ class InstillAttention(nn.Module):
         else:
             attn_mask = None
 
-        x_out = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            dropout_p=self.dropout.p if self.training else 0.0,
-        )
+        # Force the numerically-stable math SDPA backend: with frozen q/k
+        # (requires_grad=False) and only the value path trainable, the
+        # memory-efficient backend's backward can return NaN value gradients.
+        with sdpa_kernel(SDPBackend.MATH):
+            x_out = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=self.dropout.p if self.training else 0.0,
+            )
         x_out = rearrange(x_out, "b h n d -> b n (h d)")
         x_out = self.to_out(x_out)
 
-        y_out = F.scaled_dot_product_attention(
-            q,
-            k,
-            another_v,
-            attn_mask=attn_mask,
-            dropout_p=self.dropout.p if self.training else 0.0,
-        )
+        with sdpa_kernel(SDPBackend.MATH):
+            y_out = F.scaled_dot_product_attention(
+                q,
+                k,
+                another_v,
+                attn_mask=attn_mask,
+                dropout_p=self.dropout.p if self.training else 0.0,
+            )
         y_out = rearrange(y_out, "b h n d -> b n (h d)")
         y_out = self.to_yout(y_out)
 

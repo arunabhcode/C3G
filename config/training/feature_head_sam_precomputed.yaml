@@ -28,7 +28,7 @@ model:
     pose_free: true
     intrinsics_embed_loc: None
     intrinsics_embed_type: None
-    pretrained_weights: "./pretrained_weights/model.pt"
+    pretrained_weights: "/home/tiny/C3G/pretrained_weights/gaussian_decoder.ckpt"
     init_points: one_point
     gaussian_feature_dim: 256
     different_learnable_tokens: true
