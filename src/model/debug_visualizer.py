@@ -161,6 +161,38 @@ def compute_feature_norms(feature):
     return feature.norm(dim=0).flatten()
 
 
+def crop_sam_masks(masks, embeddings):
+    """Crop SAM decoder masks to the valid (non-padded) region.
+
+    SAM features are computed from images padded to 1024x1024. The mask decoder
+    outputs (B, N, 256, 256) masks in that padded space. We detect the valid
+    region from the input embeddings (C, 64, 64) by finding where rows/cols
+    are all zeros (padding), then scale to the 256x256 mask space.
+    """
+    _, _, mask_h, mask_w = masks.shape
+    c, fh, fw = embeddings.shape
+
+    row_norms = embeddings.abs().sum(dim=0).sum(dim=1)
+    col_norms = embeddings.abs().sum(dim=0).sum(dim=0)
+
+    valid_rows = (row_norms > 0).sum().item()
+    valid_cols = (col_norms > 0).sum().item()
+
+    if valid_rows == 0:
+        valid_rows = fh
+    if valid_cols == 0:
+        valid_cols = fw
+
+    crop_h = int(round(valid_rows / fh * mask_h))
+    crop_w = int(round(valid_cols / fw * mask_w))
+    crop_h = min(crop_h, mask_h)
+    crop_w = min(crop_w, mask_w)
+
+    if crop_h == mask_h and crop_w == mask_w:
+        return masks
+    return masks[:, :, :crop_h, :crop_w]
+
+
 def log_decoder_debug(
     logger,
     global_step,
@@ -198,6 +230,9 @@ def log_decoder_debug(
 
         sam_masks = sam_decoder(sam_input)
         rendered_masks = sam_decoder(rendered_input)
+
+        sam_masks = crop_sam_masks(sam_masks, target_sam_feature)
+        rendered_masks = crop_sam_masks(rendered_masks, rendered_feature)
 
     num_masks = sam_masks.shape[1]
     columns = ["target_rgb", "sam_masks_overlay", "rendered_masks_overlay"]
