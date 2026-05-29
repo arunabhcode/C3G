@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 import torch.nn.functional as F
 import wandb
@@ -83,23 +82,38 @@ def log_debug_visualizations(
     target_norms = compute_feature_norms(target_sam_feature)
     rendered_norms = compute_feature_norms(rendered_feature)
 
+    target_norms_np = target_norms.detach().cpu().numpy()
+    rendered_norms_np = rendered_norms.detach().cpu().numpy()
+
     logger.experiment.log(
         {
-            "val/feature_norm_histogram": wandb.Histogram(
-                np.concatenate(
-                    [
-                        target_norms.detach().cpu().numpy(),
-                        rendered_norms.detach().cpu().numpy(),
-                    ]
-                )
-            ),
-            "val/target_feature_norm_min": target_norms.min().item(),
-            "val/target_feature_norm_max": target_norms.max().item(),
-            "val/target_feature_norm_std": target_norms.std().item(),
-            "val/rendered_feature_norm_min": rendered_norms.min().item(),
-            "val/rendered_feature_norm_max": rendered_norms.max().item(),
-            "val/rendered_feature_norm_std": rendered_norms.std().item(),
+            "val/target_feature_norms": wandb.Histogram(target_norms_np),
+            "val/rendered_feature_norms": wandb.Histogram(rendered_norms_np),
         },
+        step=global_step,
+    )
+
+    stats_table = wandb.Table(
+        columns=["source", "min", "max", "mean", "std"],
+        data=[
+            [
+                "target",
+                target_norms.min().item(),
+                target_norms.max().item(),
+                target_norms.mean().item(),
+                target_norms.std().item(),
+            ],
+            [
+                "rendered",
+                rendered_norms.min().item(),
+                rendered_norms.max().item(),
+                rendered_norms.mean().item(),
+                rendered_norms.std().item(),
+            ],
+        ],
+    )
+    logger.experiment.log(
+        {"val/feature_norm_stats": stats_table},
         step=global_step,
     )
 
