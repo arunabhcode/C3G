@@ -125,7 +125,7 @@ class EncoderVGGT(Encoder[EncoderVGGTCfg]):
 
             if self.cfg.different_learnable_tokens:
                 self.gaussian_tokens_feature = nn.Parameter(
-                    torch.randn(cfg.num_gaussians, self.cfg.feature_dim)
+                    torch.randn(cfg.num_gaussians, self.cfg.feature_dim) * 0.02
                 )
                 self.feature_gmae_to_gaussians = nn.Linear(
                     self.cfg.feature_dim,
