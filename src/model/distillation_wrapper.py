@@ -208,9 +208,9 @@ class DistillationModelWrapper(LightningModule):
                 self.logger,
                 self.global_step,
                 get_cfg()["checkpointing"]["every_n_train_steps"],
-                batch["target"]["image"][0, 0],
-                target_sam[0, 0],
-                rendered_interp[0, 0],
+                batch["target"]["image"][0, 0].detach().float(),
+                target_sam[0, 0].detach().float(),
+                rendered_interp[0, 0].detach().float(),
                 (h, w),
                 prefix="train",
             )
