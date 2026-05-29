@@ -185,12 +185,6 @@ def train(cfg_dict: DictConfig):
             feature_cosine_loss_weight=cfg_dict.train.get(
                 "feature_cosine_loss_weight", 1.0
             ),
-            feature_norm_loss_weight=cfg_dict.train.get(
-                "feature_norm_loss_weight", 0.1
-            ),
-            feature_variance_loss_weight=cfg_dict.train.get(
-                "feature_variance_loss_weight", 0.1
-            ),
             depth_mode=cfg.train.depth_mode,
             context_view_loss=cfg.train.context_view_loss,
             original_image_shape=tuple(

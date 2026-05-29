@@ -33,7 +33,7 @@ model:
     gaussian_feature_dim: 256
     different_learnable_tokens: false
     freeze_backbone: true
-    freeze_instill_qk: false
+    freeze_instill_qk: true
     freeze_geometry_head: true
   decoder:
     make_scale_invariant: true
@@ -54,8 +54,6 @@ train:
   pipeline: distillation
   feature_mse_loss_weight: 1.0
   feature_cosine_loss_weight: 1.0
-  feature_norm_loss_weight: 0.0
-  feature_variance_loss_weight: 0.0
   context_view_loss: true
 
 trainer:
