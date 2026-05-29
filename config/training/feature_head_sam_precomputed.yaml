@@ -31,6 +31,7 @@ model:
     pretrained_weights: "./pretrained_weights/model.pt"
     init_points: one_point
     gaussian_feature_dim: 256
+    different_learnable_tokens: true
     freeze_backbone: true
     freeze_instill_qk: true
     freeze_geometry_head: true
