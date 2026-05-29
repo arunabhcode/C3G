@@ -204,6 +204,16 @@ class DistillationModelWrapper(LightningModule):
 
         accum = self.trainer.accumulate_grad_batches or 1
         if self.global_rank == 0 and (batch_idx + 1) % accum == 0:
+            log_debug_visualizations(
+                self.logger,
+                self.global_step,
+                get_cfg()["checkpointing"]["every_n_train_steps"],
+                batch["target"]["image"][0, 0],
+                target_sam[0, 0],
+                rendered_interp[0, 0],
+                (h, w),
+                prefix="train",
+            )
             print(
                 f"train step {self.global_step} finished; "
                 f"loss = {total_loss.detach().item():.6f}; "
