@@ -38,6 +38,7 @@ with install_import_hook(
     from src.model.distillation_wrapper import (
         DistillationModelWrapper,
         DistillTrainCfg,
+        DebugDecoderCfg,
         OptimizerCfg as DistillOptimizerCfg,
     )
     from src.model.load_foundation_model import load_foundation_model
@@ -188,6 +189,19 @@ def train(cfg_dict: DictConfig):
             lr=cfg.optimizer.lr,
             warm_up_steps=cfg.optimizer.warm_up_steps,
         )
+
+        debug_decoder_cfg = None
+        if cfg_dict.get("debug_decoder", {}).get("enabled", False):
+            debug_decoder_cfg = DebugDecoderCfg(
+                enabled=True,
+                sam_checkpoint=cfg_dict.debug_decoder.get(
+                    "sam_checkpoint", "./pretrained_weights/sam_vit_h.pth"
+                ),
+                sam_model_variant=cfg_dict.debug_decoder.get(
+                    "sam_model_variant", "sam_vit_h"
+                ),
+            )
+
         model_wrapper = DistillationModelWrapper(
             distill_optimizer_cfg,
             distill_train_cfg,
@@ -195,6 +209,7 @@ def train(cfg_dict: DictConfig):
             get_decoder(cfg.model.decoder),
             get_losses(cfg.loss),
             step_tracker,
+            debug_decoder_cfg=debug_decoder_cfg,
         )
     else:
         vggt, dino, lseg_feature_extractor, clip, sam_encoder, feature_dim = (

@@ -159,3 +159,136 @@ def alpha_blend(overlay, background, alpha=0.5):
 def compute_feature_norms(feature):
     """Compute per-spatial-position L2 norms, returns flat vector of length H*W."""
     return feature.norm(dim=0).flatten()
+
+
+def log_decoder_debug(
+    logger,
+    global_step,
+    checkpoint_interval,
+    sam_decoder,
+    target_sam_feature,
+    rendered_feature,
+    target_rgb,
+    img_size,
+    prefix="train",
+):
+    """Run SAM decoder on both SAM and rendered embeddings, log masks to wandb table."""
+    if global_step % checkpoint_interval != 0:
+        return
+    if not isinstance(logger, WandbLogger):
+        return
+    if rendered_feature is None or sam_decoder is None:
+        return
+
+    h, w = img_size
+    target_rgb_norm = inverse_normalize(target_rgb)
+
+    with torch.no_grad():
+        sam_input = target_sam_feature.unsqueeze(0)
+        rendered_input = rendered_feature.unsqueeze(0)
+
+        if sam_input.shape[-2:] != (64, 64):
+            sam_input = F.interpolate(
+                sam_input, size=(64, 64), mode="bilinear", align_corners=False
+            )
+        if rendered_input.shape[-2:] != (64, 64):
+            rendered_input = F.interpolate(
+                rendered_input, size=(64, 64), mode="bilinear", align_corners=False
+            )
+
+        sam_masks = sam_decoder(sam_input)
+        rendered_masks = sam_decoder(rendered_input)
+
+    num_masks = sam_masks.shape[1]
+    columns = ["target_rgb", "sam_masks_overlay", "rendered_masks_overlay"]
+    for i in range(num_masks):
+        columns.append(f"sam_mask_{i}")
+        columns.append(f"rendered_mask_{i}")
+
+    table = wandb.Table(columns=columns)
+
+    sam_overlay = colorize_masks_overlay(sam_masks[0], target_rgb_norm, (h, w))
+    rendered_overlay = colorize_masks_overlay(
+        rendered_masks[0], target_rgb_norm, (h, w)
+    )
+
+    row = [
+        wandb.Image(to_hwc_uint8(target_rgb_norm)),
+        wandb.Image(to_hwc_uint8(sam_overlay)),
+        wandb.Image(to_hwc_uint8(rendered_overlay)),
+    ]
+
+    for i in range(num_masks):
+        sam_mask_i = sam_masks[0, i]
+        rendered_mask_i = rendered_masks[0, i]
+
+        sam_mask_resized = (
+            F.interpolate(
+                sam_mask_i.unsqueeze(0).unsqueeze(0).float(),
+                size=(h, w),
+                mode="bilinear",
+                align_corners=False,
+            )
+            .squeeze(0)
+            .squeeze(0)
+        )
+
+        rendered_mask_resized = (
+            F.interpolate(
+                rendered_mask_i.unsqueeze(0).unsqueeze(0).float(),
+                size=(h, w),
+                mode="bilinear",
+                align_corners=False,
+            )
+            .squeeze(0)
+            .squeeze(0)
+        )
+
+        sam_mask_rgb = mask_to_colored_rgb(sam_mask_resized, i)
+        rendered_mask_rgb = mask_to_colored_rgb(rendered_mask_resized, i)
+
+        row.append(wandb.Image(to_hwc_uint8(sam_mask_rgb)))
+        row.append(wandb.Image(to_hwc_uint8(rendered_mask_rgb)))
+
+    table.add_data(*row)
+    logger.experiment.log({f"{prefix}/decoder_debug": table})
+
+
+MASK_COLORS = [
+    torch.tensor([1.0, 0.2, 0.2]),  # red
+    torch.tensor([0.2, 0.8, 0.2]),  # green
+    torch.tensor([0.2, 0.4, 1.0]),  # blue
+    torch.tensor([1.0, 0.8, 0.0]),  # yellow
+]
+
+
+def mask_to_colored_rgb(mask_logits, mask_idx):
+    """Convert mask logits to a colored RGB visualization (3, H, W) in [0, 1]."""
+    prob = torch.sigmoid(mask_logits)
+    color = MASK_COLORS[mask_idx % len(MASK_COLORS)].to(mask_logits.device)
+    return prob.unsqueeze(0) * color.view(3, 1, 1)
+
+
+def colorize_masks_overlay(masks, background, img_size):
+    """Blend all masks as colored overlays onto background image, returns (3, H, W)."""
+    h, w = img_size
+    num_masks = masks.shape[0]
+    overlay = torch.zeros(3, h, w, device=masks.device)
+
+    for i in range(num_masks):
+        mask_resized = (
+            F.interpolate(
+                masks[i].unsqueeze(0).unsqueeze(0).float(),
+                size=(h, w),
+                mode="bilinear",
+                align_corners=False,
+            )
+            .squeeze(0)
+            .squeeze(0)
+        )
+        prob = torch.sigmoid(mask_resized)
+        color = MASK_COLORS[i % len(MASK_COLORS)].to(masks.device)
+        overlay += prob.unsqueeze(0) * color.view(3, 1, 1)
+
+    overlay = overlay.clamp(0, 1)
+    return alpha_blend(overlay, background, alpha=0.5)

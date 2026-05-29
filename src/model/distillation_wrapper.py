@@ -13,7 +13,7 @@ from ..global_cfg import get_cfg
 from ..loss import Loss
 from ..misc.step_tracker import StepTracker
 from .decoder.decoder import Decoder, DepthRenderingMode
-from .debug_visualizer import log_debug_visualizations
+from .debug_visualizer import log_debug_visualizations, log_decoder_debug
 from .encoder.encoder_vggt import EncoderVGGT
 from .types import Gaussians
 
@@ -24,6 +24,13 @@ class DistillTrainCfg:
     depth_mode: DepthRenderingMode | None = None
     context_view_loss: bool = True
     random_select_context_view: bool = False
+
+
+@dataclass
+class DebugDecoderCfg:
+    enabled: bool = False
+    sam_checkpoint: str = "./pretrained_weights/sam_vit_h.pth"
+    sam_model_variant: str = "sam_vit_h"
 
 
 @dataclass
@@ -43,6 +50,7 @@ class DistillationModelWrapper(LightningModule):
         decoder: Decoder,
         losses: list[Loss],
         step_tracker: StepTracker | None,
+        debug_decoder_cfg: DebugDecoderCfg | None = None,
     ) -> None:
         super().__init__()
         self.optimizer_cfg = optimizer_cfg
@@ -52,6 +60,18 @@ class DistillationModelWrapper(LightningModule):
         self.decoder = decoder
         self.data_shim = get_data_shim(self.encoder)
         self.losses = nn.ModuleList(losses)
+
+        self.sam_debug_decoder = None
+        if debug_decoder_cfg and debug_decoder_cfg.enabled:
+            from .sam_decoder import SAMMaskDecoderWrapper
+
+            self.sam_debug_decoder = SAMMaskDecoderWrapper(
+                debug_decoder_cfg.sam_checkpoint,
+                model_variant=debug_decoder_cfg.sam_model_variant,
+            )
+            self.sam_debug_decoder.eval()
+            for p in self.sam_debug_decoder.parameters():
+                p.requires_grad = False
 
     @rank_zero_only
     def on_train_start(self) -> None:
@@ -214,6 +234,17 @@ class DistillationModelWrapper(LightningModule):
                 (h, w),
                 prefix="train",
             )
+            log_decoder_debug(
+                self.logger,
+                self.global_step,
+                get_cfg()["checkpointing"]["every_n_train_steps"],
+                self.sam_debug_decoder,
+                target_sam[0, 0].detach().float(),
+                rendered_interp[0, 0].detach().float(),
+                batch["target"]["image"][0, 0].detach().float(),
+                (h, w),
+                prefix="train",
+            )
             print(
                 f"train step {self.global_step} finished; "
                 f"loss = {total_loss.detach().item():.6f}; "
@@ -286,6 +317,17 @@ class DistillationModelWrapper(LightningModule):
                 target_sam[0, 0],
                 rendered_interp[0, 0],
                 (h, w),
+            )
+            log_decoder_debug(
+                self.logger,
+                self.global_step,
+                get_cfg()["checkpointing"]["every_n_train_steps"],
+                self.sam_debug_decoder,
+                target_sam[0, 0].detach().float(),
+                rendered_interp[0, 0].detach().float(),
+                batch["target"]["image"][0, 0].detach().float(),
+                (h, w),
+                prefix="val",
             )
 
     def configure_optimizers(self):
