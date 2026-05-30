@@ -41,7 +41,7 @@ model:
     feature_detach: true
 
 optimizer:
-  lr: 1e-4
+  lr: 1e-5
   warm_up_steps: 1000
   weight_decay: 0.05
   feature_head_weight_decay: 0.01
@@ -52,7 +52,7 @@ data_loader:
 
 train:
   pipeline: distillation
-  feature_mse_loss_weight: 1.0
+  feature_mse_loss_weight: 0.05
   feature_cosine_loss_weight: 1.0
   context_view_loss: true
 
