@@ -187,9 +187,6 @@ def train(cfg_dict: DictConfig):
             ),
             depth_mode=cfg.train.depth_mode,
             context_view_loss=cfg.train.context_view_loss,
-            original_image_shape=tuple(
-                list(cfg_dict.dataset.values())[0].original_image_shape
-            ),
         )
         distill_optimizer_cfg = DistillOptimizerCfg(
             lr=cfg.optimizer.lr,

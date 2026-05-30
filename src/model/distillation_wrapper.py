@@ -39,7 +39,6 @@ class DistillTrainCfg:
     depth_mode: DepthRenderingMode | None = None
     context_view_loss: bool = True
     random_select_context_view: bool = False
-    original_image_shape: tuple[int, int] = (480, 640)
 
 
 @dataclass
@@ -126,12 +125,7 @@ class DistillationModelWrapper(LightningModule):
 
     def _get_valid_region(self, sam_features):
         """Return valid (non-padding) region size in the 64x64 SAM embedding space."""
-        orig_h, orig_w = self.train_cfg.original_image_shape
-        longest = max(orig_h, orig_w)
-        embed_size = sam_features.shape[-1]
-        valid_h = int(round(orig_h / longest * embed_size))
-        valid_w = int(round(orig_w / longest * embed_size))
-        return valid_h, valid_w
+        return sam_features.shape[-2], sam_features.shape[-1]
 
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)

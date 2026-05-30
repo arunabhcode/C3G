@@ -30,6 +30,7 @@ from pathlib import Path
 
 import cv2
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 
 # Ensure the project root is importable
@@ -37,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.misc.frame_layout import list_frame_ids
 from src.model.sam.loader import load_sam
-from src.model.sam.preprocess import preprocess_images, resize_images_longest_side
+from src.model.sam.preprocess import preprocess_images
 
 logger = logging.getLogger(__name__)
 
@@ -156,8 +157,10 @@ def encode_batch(
         (B, 256, 64, 64) float32 tensor of SAM image embeddings.
     """
     images = images.to(device)
-    resized = resize_images_longest_side(images)
-    preprocessed = preprocess_images(sam, resized)
+    images = F.interpolate(
+        images, size=(1024, 1024), mode="bilinear", align_corners=False
+    )
+    preprocessed = preprocess_images(sam, images)
     embeddings = sam.image_encoder(preprocessed)
     return embeddings.cpu()
 
