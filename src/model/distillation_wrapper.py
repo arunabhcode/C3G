@@ -198,9 +198,9 @@ class DistillationModelWrapper(LightningModule):
         rendered_crop = rendered_interp[:, :, :, :valid_h, :valid_w]
         target_crop = all_sam[:, :, :, :valid_h, :valid_w]
 
-        rendered_normed = F.normalize(rendered_crop, dim=2)
-        target_normed = F.normalize(target_crop, dim=2)
-        feature_mse_loss = F.mse_loss(rendered_normed, target_normed)
+        # rendered_normed = F.normalize(rendered_crop, dim=2)
+        # target_normed = F.normalize(target_crop, dim=2)
+        feature_mse_loss = F.mse_loss(rendered_crop, target_crop)
         feature_cosine_loss = compute_feature_losses(rendered_crop, target_crop)
 
         total_loss = (
@@ -340,9 +340,9 @@ class DistillationModelWrapper(LightningModule):
         rendered_crop = rendered_interp[:, :, :, :valid_h, :valid_w]
         target_crop = target_sam[:, :, :, :valid_h, :valid_w]
 
-        rendered_normed = F.normalize(rendered_crop, dim=2)
-        target_normed = F.normalize(target_crop, dim=2)
-        val_mse = F.mse_loss(rendered_normed, target_normed)
+        # rendered_normed = F.normalize(rendered_crop, dim=2)
+        # target_normed = F.normalize(target_crop, dim=2)
+        val_mse = F.mse_loss(rendered_crop, target_crop)
         val_cosine = compute_feature_losses(rendered_crop, target_crop)
         for loss_name, loss_value in (
             ("val/feature_mse", val_mse),

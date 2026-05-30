@@ -289,6 +289,7 @@ class EncoderVGGT(Encoder[EncoderVGGTCfg]):
                 gpt=self.cfg.gaussians_per_token,
                 c=self.cfg.gaussian_feature_dim,
             )
+            gaussian_feature = F.normalize(gaussian_feature, p=2, dim=-1)
         else:
             gaussian_feature = None
 
