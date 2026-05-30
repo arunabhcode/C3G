@@ -178,6 +178,45 @@ def train(cfg_dict: DictConfig):
                 del new_ckpt
             else:
                 raise ValueError(f"Invalid checkpoint format: {weight_path}")
+
+            geometry_missing = [
+                k
+                for k in missing_keys
+                if any(
+                    g in k
+                    for g in (
+                        "gaussian_token",
+                        "gmae_to_gaussians",
+                        "gmae_decoder",
+                        "anchor_positions",
+                        "feature_gmae_to_gaussians",
+                        "gaussian_tokens_feature",
+                    )
+                )
+            ]
+            print(
+                f"[load] missing={len(missing_keys)} unexpected={len(unexpected_keys)}"
+            )
+            print(
+                f"  missing geometry keys ({len(geometry_missing)}):",
+                geometry_missing[:10],
+            )
+            if unexpected_keys:
+                print(f"  unexpected keys (first 10):", unexpected_keys[:10])
+            if geometry_missing:
+                frozen_geometry = any(
+                    not p.requires_grad
+                    for n, p in encoder.named_parameters()
+                    if any(g in n for g in ("gaussian_token", "gmae_to_gaussians"))
+                )
+                if frozen_geometry:
+                    raise RuntimeError(
+                        f"FATAL: {len(geometry_missing)} geometry keys missing from "
+                        f"checkpoint '{weight_path}' but geometry is frozen! "
+                        f"Frozen random-init params will produce garbage. "
+                        f"Missing: {geometry_missing[:5]}"
+                    )
+
             del ckpt_weights
 
         distill_train_cfg = DistillTrainCfg(
@@ -263,6 +302,15 @@ def train(cfg_dict: DictConfig):
                 del new_ckpt
             else:
                 raise ValueError(f"Invalid checkpoint format: {weight_path}")
+
+            print(
+                f"[load] missing={len(missing_keys)} unexpected={len(unexpected_keys)}"
+            )
+            if missing_keys:
+                print(f"  missing keys (first 10):", missing_keys[:10])
+            if unexpected_keys:
+                print(f"  unexpected keys (first 10):", unexpected_keys[:10])
+
             del ckpt_weights
 
         model_wrapper = ModelWrapper(
