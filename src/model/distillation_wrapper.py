@@ -260,13 +260,18 @@ class DistillationModelWrapper(LightningModule):
 
         accum = self.trainer.accumulate_grad_batches or 1
         if self.global_rank == 0 and (batch_idx + 1) % accum == 0:
+            # Calculate the average "volume" of the real SAM features
+            target_magnitude = target_crop.norm(dim=2).mean().detach()
+            # Amplify your rendered features to match that volume
+            rendered_for_decoder = rendered_interp * target_magnitude
+
             log_debug_visualizations(
                 self.logger,
                 self.global_step,
                 get_cfg()["checkpointing"]["every_n_train_steps"],
                 batch["target"]["image"][0, 0].detach().float(),
                 target_sam[0, 0].detach().float(),
-                rendered_interp[0, 0].detach().float(),
+                rendered_for_decoder[0, 0].detach().float(),
                 (h, w),
                 prefix="train",
                 valid_region=(valid_h, valid_w),
@@ -280,7 +285,7 @@ class DistillationModelWrapper(LightningModule):
                 get_cfg()["checkpointing"]["every_n_train_steps"],
                 self.sam_debug_decoder,
                 target_sam[0, 0].detach().float(),
-                rendered_interp[0, 0].detach().float(),
+                rendered_for_decoder[0, 0].detach().float(),
                 batch["target"]["image"][0, 0].detach().float(),
                 (h, w),
                 prefix="train",
@@ -362,13 +367,15 @@ class DistillationModelWrapper(LightningModule):
             )
 
         if self.global_rank == 0:
+            target_magnitude = target_crop.norm(dim=2).mean().detach()
+            rendered_for_decoder = rendered_interp * target_magnitude
             log_debug_visualizations(
                 self.logger,
                 self.global_step,
                 get_cfg()["checkpointing"]["every_n_train_steps"],
                 batch["target"]["image"][0, 0],
                 target_sam[0, 0],
-                rendered_interp[0, 0],
+                rendered_for_decoder[0, 0],
                 (h, w),
                 valid_region=(valid_h, valid_w),
                 rendered_rgb=output.color[0, 0].detach().float()
@@ -381,7 +388,7 @@ class DistillationModelWrapper(LightningModule):
                 get_cfg()["checkpointing"]["every_n_train_steps"],
                 self.sam_debug_decoder,
                 target_sam[0, 0].detach().float(),
-                rendered_interp[0, 0].detach().float(),
+                rendered_for_decoder[0, 0].detach().float(),
                 batch["target"]["image"][0, 0].detach().float(),
                 (h, w),
                 prefix="val",
