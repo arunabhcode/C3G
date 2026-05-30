@@ -179,20 +179,20 @@ def train(cfg_dict: DictConfig):
             else:
                 raise ValueError(f"Invalid checkpoint format: {weight_path}")
 
+            geometry_param_names = {
+                "gaussian_token",
+                "gaussian_tokens",
+                "gmae_to_gaussians",
+                "anchor_positions",
+            }
             geometry_missing = [
+                k for k in missing_keys if k.split(".", 1)[0] in geometry_param_names
+            ]
+            named_params = dict(encoder.named_parameters())
+            frozen_geometry_missing = [
                 k
-                for k in missing_keys
-                if any(
-                    g in k
-                    for g in (
-                        "gaussian_token",
-                        "gmae_to_gaussians",
-                        "gmae_decoder",
-                        "anchor_positions",
-                        "feature_gmae_to_gaussians",
-                        "gaussian_tokens_feature",
-                    )
-                )
+                for k in geometry_missing
+                if k in named_params and not named_params[k].requires_grad
             ]
             print(
                 f"[load] missing={len(missing_keys)} unexpected={len(unexpected_keys)}"
@@ -201,21 +201,20 @@ def train(cfg_dict: DictConfig):
                 f"  missing geometry keys ({len(geometry_missing)}):",
                 geometry_missing[:10],
             )
+            if frozen_geometry_missing:
+                print(
+                    f"  missing frozen geometry keys ({len(frozen_geometry_missing)}):",
+                    frozen_geometry_missing[:10],
+                )
             if unexpected_keys:
                 print(f"  unexpected keys (first 10):", unexpected_keys[:10])
-            if geometry_missing:
-                frozen_geometry = any(
-                    not p.requires_grad
-                    for n, p in encoder.named_parameters()
-                    if any(g in n for g in ("gaussian_token", "gmae_to_gaussians"))
+            if frozen_geometry_missing:
+                raise RuntimeError(
+                    f"FATAL: {len(frozen_geometry_missing)} frozen geometry keys "
+                    f"missing from checkpoint '{weight_path}'! Frozen random-init "
+                    f"params will produce garbage. Missing: "
+                    f"{frozen_geometry_missing[:5]}"
                 )
-                if frozen_geometry:
-                    raise RuntimeError(
-                        f"FATAL: {len(geometry_missing)} geometry keys missing from "
-                        f"checkpoint '{weight_path}' but geometry is frozen! "
-                        f"Frozen random-init params will produce garbage. "
-                        f"Missing: {geometry_missing[:5]}"
-                    )
 
             del ckpt_weights
 
