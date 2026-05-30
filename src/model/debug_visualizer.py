@@ -18,6 +18,7 @@ def log_debug_visualizations(
     img_size,
     prefix="val",
     valid_region=None,
+    rendered_rgb=None,
 ):
     """Log debug visualization table and feature norm stats to wandb.
 
@@ -74,22 +75,29 @@ def log_debug_visualizations(
     mse_overlay = alpha_blend(mse_colored, target_rgb_norm)
     cosine_overlay = alpha_blend(cosine_colored, target_rgb_norm)
 
-    table = wandb.Table(
-        columns=[
-            "target_rgb",
-            "target_sam_pca",
-            "rendered_feature_pca",
-            "mse_heatmap_overlay",
-            "cosine_error_overlay",
-        ]
-    )
-    table.add_data(
+    columns = [
+        "target_rgb",
+        "target_sam_pca",
+        "rendered_feature_pca",
+        "mse_heatmap_overlay",
+        "cosine_error_overlay",
+    ]
+    if rendered_rgb is not None:
+        columns.append("rendered_rgb")
+
+    table = wandb.Table(columns=columns)
+
+    row = [
         wandb.Image(to_hwc_uint8(target_rgb_norm)),
         wandb.Image(to_hwc_uint8(target_pca.squeeze(0))),
         wandb.Image(to_hwc_uint8(rendered_pca.squeeze(0))),
         wandb.Image(to_hwc_uint8(mse_overlay)),
         wandb.Image(to_hwc_uint8(cosine_overlay)),
-    )
+    ]
+    if rendered_rgb is not None:
+        row.append(wandb.Image(to_hwc_uint8(rendered_rgb)))
+
+    table.add_data(*row)
     logger.experiment.log({f"{prefix}/debug_visualizations": table})
 
     target_norms = compute_feature_norms(target_sam_feature)

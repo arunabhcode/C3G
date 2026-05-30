@@ -270,6 +270,9 @@ class DistillationModelWrapper(LightningModule):
                 (h, w),
                 prefix="train",
                 valid_region=(valid_h, valid_w),
+                rendered_rgb=output.color[0, 0].detach().float()
+                if output.color is not None
+                else None,
             )
             log_decoder_debug(
                 self.logger,
@@ -368,6 +371,9 @@ class DistillationModelWrapper(LightningModule):
                 rendered_interp[0, 0],
                 (h, w),
                 valid_region=(valid_h, valid_w),
+                rendered_rgb=output.color[0, 0].detach().float()
+                if output.color is not None
+                else None,
             )
             log_decoder_debug(
                 self.logger,

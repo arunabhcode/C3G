@@ -4,9 +4,9 @@ defaults:
   - /dataset@_group_.scannet_distill: scannet_distill
   - override /model/encoder: noposplat
   - override /model/encoder/backbone: croco
-  - override /loss: []
+  - override /loss: [mse]
 
-loss: {}
+# loss: {}  # uncomment and remove mse override to disable RGB loss sanity check
 
 wandb:
   mode: online
