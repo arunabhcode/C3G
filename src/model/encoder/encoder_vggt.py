@@ -253,7 +253,9 @@ class EncoderVGGT(Encoder[EncoderVGGTCfg]):
             decoded_tokens = self.gmae_decoder(all_decoder_tokens, mask=None)  # b n d
 
         gaussian_params = self.gmae_to_gaussians(
-            decoded_tokens[:, -self.gaussian_tokens.shape[0] :]
+            decoded_tokens[:, -self.gaussian_tokens.shape[0] :].detach()
+            if self.cfg.freeze_geometry_head
+            else decoded_tokens[:, -self.gaussian_tokens.shape[0] :]
         )  # b n d(3+1+d')
 
         if self.cfg.feature_dim > 0:
