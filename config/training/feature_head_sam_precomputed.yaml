@@ -42,7 +42,7 @@ model:
 
 optimizer:
   lr: 1e-5
-  warm_up_steps: 1000
+  warm_up_steps: 100
   weight_decay: 0.05
   feature_head_weight_decay: 0.01
 
@@ -57,7 +57,7 @@ train:
   context_view_loss: true
 
 trainer:
-  max_steps: 5001
+  max_steps: 1001
   val_check_interval: 500
   accumulate_grad_batches: 2
 
