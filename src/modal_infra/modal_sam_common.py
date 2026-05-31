@@ -36,6 +36,7 @@ TRAINING_CONFIG_SAM: TrainingConfigName = "feature_head_sam"
 WEIGHTS_VOLUME = "c3g-weights"
 OUTPUT_VOLUME = "c3g-train-outputs"
 SAM_EVAL_OUTPUT_VOLUME = "sam-eval-outputs"
+PRECOMPUTE_SAM_FEATURES_VOLUME = "precompute_sam_features"
 REPLICA_VOLUME = "replica"
 SCANNET_VOLUME = "scannet"
 
@@ -44,6 +45,7 @@ REPLICA_MOUNT = Path("/replica")
 SCANNET_MOUNT = Path("/scannet")
 OUTPUT_MOUNT = Path("/outputs")
 SAM_EVAL_OUTPUT_MOUNT = Path("/sam-eval-outputs")
+PRECOMPUTE_SAM_FEATURES_MOUNT = Path("/precompute_sam_features")
 
 SAM_NUM_CHANNELS = 256
 DEFAULT_SAM_CHECKPOINT = WEIGHTS_MOUNT / "sam_vit_h.pth"
@@ -140,6 +142,45 @@ def resolve_detach(*, detach: bool | None, remote_job: bool) -> bool:
     if detach is not None:
         return detach
     return remote_job
+
+
+def run_subprocess_with_precompute_commit(
+    *,
+    cmd: list[str],
+    cwd: Path | str,
+    output_root: Path,
+    commit: Callable[[], None],
+    poll_interval_s: float = 30.0,
+) -> None:
+    """Run precompute subprocess and persist ``*_sam.pt`` files to a Modal volume."""
+    stop_event = threading.Event()
+    seen_features: set[str] = set()
+
+    def _commit_loop() -> None:
+        while not stop_event.is_set():
+            if output_root.is_dir():
+                for feature_path in output_root.rglob("*_sam.pt"):
+                    rel = str(feature_path.relative_to(output_root))
+                    if rel not in seen_features:
+                        seen_features.add(rel)
+                        commit()
+                        print(f"Committed precompute volume: {rel}")
+
+            stop_event.wait(poll_interval_s)
+
+    thread = threading.Thread(
+        target=_commit_loop,
+        name="modal-precompute-commit",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        subprocess.run(cmd, check=True, cwd=str(cwd))
+    finally:
+        stop_event.set()
+        thread.join(timeout=poll_interval_s + 5)
+        commit()
+        print(f"Committed precompute volume (final): {output_root}")
 
 
 def run_subprocess_with_output_commit(
@@ -439,6 +480,7 @@ CONFIG_H = (
     "submodules/diff_gaussian_rasterization_w_feature_detach/cuda_rasterizer/config.h"
 )
 C3G_MODAL_WORKSPACE = Path("/workspace")
+C3G_MODAL_PYTHON = "3.12"
 VANILLA_SAM_MODAL_ROOT = Path("/root")
 
 
@@ -506,8 +548,11 @@ def build_c3g_modal_image(
     import modal
 
     root = repo_root or repo_root_for_modal()
+    python_version = C3G_MODAL_PYTHON
     return (
-        modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
+        modal.Image.from_registry(
+            "nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python=python_version
+        )
         .apt_install(
             "git",
             "curl",
@@ -545,9 +590,10 @@ def build_c3g_modal_image(
         .workdir(str(workspace))
         .run_commands(
             f"sed -i 's/#define NUM_SEMANTIC_CHANNELS 512/#define NUM_SEMANTIC_CHANNELS {SAM_NUM_CHANNELS}/' {CONFIG_H}",
-            "uv sync --frozen",
-            "uv run --no-sync python -c \"from submodules.diff_gaussian_rasterization_w_feature_detach.setup import _C\"",
-            "uv run --no-sync python -c \"from submodules.diff_gaussian_rasterization_w_pose.setup import _C\"",
+            f"uv python install {python_version}",
+            f"uv sync --frozen --python {python_version}",
+            f"uv run --no-sync --python {python_version} python -c \"from submodules.diff_gaussian_rasterization_w_feature_detach.setup import _C\"",
+            f"uv run --no-sync --python {python_version} python -c \"from submodules.diff_gaussian_rasterization_w_pose.setup import _C\"",
         )
         .env({"PYTHONPATH": str(workspace)})
     )

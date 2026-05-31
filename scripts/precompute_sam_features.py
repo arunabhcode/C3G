@@ -9,6 +9,7 @@ Usage::
 
     python scripts/precompute_sam_features.py \
         --dataset-root /data/replica \
+        --output-root /data/precomputed/replica \
         --dataset replica \
         --sam-checkpoint pretrained_weights/sam_vit_h.pth \
         --batch-size 8
@@ -64,6 +65,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         required=True,
         help="Root directory of the dataset (e.g. /data/replica).",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=None,
+        help=(
+            "Directory to write {frame_id}_sam.pt files. Defaults to "
+            "--dataset-root (same layout as images/cameras)."
+        ),
     )
     parser.add_argument(
         "--dataset",
@@ -167,38 +177,44 @@ def encode_batch(
 
 def process_scene(
     sam,
-    scene_dir: Path,
+    input_scene_dir: Path,
+    output_scene_dir: Path,
     device: torch.device,
     batch_size: int,
     overwrite: bool,
 ) -> tuple[int, int]:
     """Process all frames in a scene directory.
 
+    Reads RGB frames from ``input_scene_dir`` and writes SAM features to
+    ``output_scene_dir`` (may be the same path).
+
     Returns:
         (processed_count, skipped_count) tuple.
     """
-    frame_ids = list_frame_ids(scene_dir)
+    frame_ids = list_frame_ids(input_scene_dir)
     if not frame_ids:
-        logger.warning(f"No frames found in {scene_dir}, skipping scene.")
+        logger.warning(f"No frames found in {input_scene_dir}, skipping scene.")
         return 0, 0
+
+    output_scene_dir.mkdir(parents=True, exist_ok=True)
 
     # Filter out frames that already have .pt files (unless overwrite)
     frames_to_process: list[str] = []
     for fid in frame_ids:
-        output_path = scene_dir / f"{fid}_sam.pt"
+        output_path = output_scene_dir / f"{fid}_sam.pt"
         if output_path.exists() and not overwrite:
             continue
         frames_to_process.append(fid)
 
     if not frames_to_process:
         logger.info(
-            f"Scene {scene_dir.name}: all {len(frame_ids)} frames already "
+            f"Scene {input_scene_dir.name}: all {len(frame_ids)} frames already "
             f"have SAM features, skipping."
         )
         return 0, 0
 
     logger.info(
-        f"Scene {scene_dir.name}: processing {len(frames_to_process)}/{len(frame_ids)} frames."
+        f"Scene {input_scene_dir.name}: processing {len(frames_to_process)}/{len(frame_ids)} frames."
     )
 
     processed = 0
@@ -206,7 +222,7 @@ def process_scene(
 
     for start in tqdm(
         range(0, len(frames_to_process), batch_size),
-        desc=f"{scene_dir.name} batches",
+        desc=f"{input_scene_dir.name} batches",
         unit="batch",
     ):
         batch_frame_ids = frames_to_process[start : start + batch_size]
@@ -214,7 +230,7 @@ def process_scene(
         readable_frame_ids: list[str] = []
 
         for fid in batch_frame_ids:
-            image_path = scene_dir / f"{fid}_x.jpg"
+            image_path = input_scene_dir / f"{fid}_x.jpg"
             image_tensor = load_frame_image(image_path)
 
             if image_tensor is None:
@@ -230,12 +246,12 @@ def process_scene(
 
         embeddings = encode_batch(sam, torch.stack(batch_images), device)
         for i, frame_id in enumerate(readable_frame_ids):
-            output_path = scene_dir / f"{frame_id}_sam.pt"
+            output_path = output_scene_dir / f"{frame_id}_sam.pt"
             torch.save(embeddings[i].clone(), output_path)
             processed += 1
 
     logger.info(
-        f"Scene {scene_dir.name}: saved {processed} features, skipped {skipped} frames."
+        f"Scene {input_scene_dir.name}: saved {processed} features, skipped {skipped} frames."
     )
     return processed, skipped
 
@@ -251,13 +267,19 @@ def main() -> None:
     if args.batch_size <= 0:
         raise ValueError("--batch-size must be greater than 0")
 
+    output_root = args.output_root or args.dataset_root
+
     # Validate dataset root
     if not args.dataset_root.is_dir():
         raise FileNotFoundError(f"Dataset root not found: {args.dataset_root}")
+    output_root.mkdir(parents=True, exist_ok=True)
 
     # Discover scenes
     scenes = discover_scenes(args.dataset_root, args.dataset, args.scenes)
-    logger.info(f"Dataset: {args.dataset}, scenes: {len(scenes)}")
+    logger.info(
+        f"Dataset: {args.dataset}, scenes: {len(scenes)}, "
+        f"input: {args.dataset_root}, output: {output_root}"
+    )
 
     # Load SAM model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -278,14 +300,16 @@ def main() -> None:
     total_skipped = 0
 
     for scene_name in scenes:
-        scene_dir = args.dataset_root / scene_name
-        if not scene_dir.is_dir():
-            logger.warning(f"Scene directory not found: {scene_dir}, skipping.")
+        input_scene_dir = args.dataset_root / scene_name
+        if not input_scene_dir.is_dir():
+            logger.warning(f"Scene directory not found: {input_scene_dir}, skipping.")
             continue
 
+        output_scene_dir = output_root / scene_name
         processed, skipped = process_scene(
             sam=sam,
-            scene_dir=scene_dir,
+            input_scene_dir=input_scene_dir,
+            output_scene_dir=output_scene_dir,
             device=device,
             batch_size=args.batch_size,
             overwrite=args.overwrite,
