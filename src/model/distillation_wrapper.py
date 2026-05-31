@@ -198,8 +198,12 @@ class DistillationModelWrapper(LightningModule):
         rendered_crop = rendered_interp[:, :, :, :valid_h, :valid_w]
         target_crop = all_sam[:, :, :, :valid_h, :valid_w]
 
-        # rendered_normed = F.normalize(rendered_crop, dim=2)
-        # target_normed = F.normalize(target_crop, dim=2)
+        with torch.no_grad():
+            current_norm = target_crop.norm(dim=2).mean()
+            m = self.encoder.feature_norm_ema_momentum
+            new_norm = m * self.encoder.feature_norm_ema + (1 - m) * current_norm
+            self.encoder.feature_norm_ema.copy_(new_norm)
+
         feature_mse_loss = F.mse_loss(rendered_crop, target_crop)
         feature_cosine_loss = compute_feature_losses(rendered_crop, target_crop)
 
@@ -260,18 +264,13 @@ class DistillationModelWrapper(LightningModule):
 
         accum = self.trainer.accumulate_grad_batches or 1
         if self.global_rank == 0 and (batch_idx + 1) % accum == 0:
-            # Calculate the average "volume" of the real SAM features
-            target_magnitude = target_crop.norm(dim=2).mean().detach()
-            # Amplify your rendered features to match that volume
-            rendered_for_decoder = rendered_interp * target_magnitude
-
             log_debug_visualizations(
                 self.logger,
                 self.global_step,
                 get_cfg()["checkpointing"]["every_n_train_steps"],
                 batch["target"]["image"][0, 0].detach().float(),
                 target_sam[0, 0].detach().float(),
-                rendered_for_decoder[0, 0].detach().float(),
+                rendered_interp[0, 0].detach().float(),
                 (h, w),
                 prefix="train",
                 valid_region=(valid_h, valid_w),
@@ -285,7 +284,7 @@ class DistillationModelWrapper(LightningModule):
                 get_cfg()["checkpointing"]["every_n_train_steps"],
                 self.sam_debug_decoder,
                 target_sam[0, 0].detach().float(),
-                rendered_for_decoder[0, 0].detach().float(),
+                rendered_interp[0, 0].detach().float(),
                 batch["target"]["image"][0, 0].detach().float(),
                 (h, w),
                 prefix="train",
@@ -367,15 +366,13 @@ class DistillationModelWrapper(LightningModule):
             )
 
         if self.global_rank == 0:
-            target_magnitude = target_crop.norm(dim=2).mean().detach()
-            rendered_for_decoder = rendered_interp * target_magnitude
             log_debug_visualizations(
                 self.logger,
                 self.global_step,
                 get_cfg()["checkpointing"]["every_n_train_steps"],
                 batch["target"]["image"][0, 0],
                 target_sam[0, 0],
-                rendered_for_decoder[0, 0],
+                rendered_interp[0, 0],
                 (h, w),
                 valid_region=(valid_h, valid_w),
                 rendered_rgb=output.color[0, 0].detach().float()
@@ -388,7 +385,7 @@ class DistillationModelWrapper(LightningModule):
                 get_cfg()["checkpointing"]["every_n_train_steps"],
                 self.sam_debug_decoder,
                 target_sam[0, 0].detach().float(),
-                rendered_for_decoder[0, 0].detach().float(),
+                rendered_interp[0, 0].detach().float(),
                 batch["target"]["image"][0, 0].detach().float(),
                 (h, w),
                 prefix="val",
@@ -397,7 +394,7 @@ class DistillationModelWrapper(LightningModule):
 
     def configure_optimizers(self):
         no_decay_keywords = ("bias", "LayerNorm", "layernorm", "layer_norm", "ln")
-        feature_head_keyword = "feature_gmae_to_gaussians"
+        feature_head_keyword = ("feature_gmae_to_gaussians",)
 
         decay_params = []
         no_decay_params = []
@@ -407,7 +404,7 @@ class DistillationModelWrapper(LightningModule):
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
-            is_feature_head = feature_head_keyword in name
+            is_feature_head = any(kw in name for kw in feature_head_keyword)
             is_no_decay = any(kw in name for kw in no_decay_keywords)
 
             if is_feature_head:

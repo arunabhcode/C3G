@@ -136,6 +136,8 @@ class EncoderVGGT(Encoder[EncoderVGGTCfg]):
                     transformer_dim,
                     self.cfg.gaussian_feature_dim * cfg.gaussians_per_token,
                 )
+            self.register_buffer("feature_norm_ema", torch.ones(1))
+            self.feature_norm_ema_momentum = 0.99
 
         else:
             self.gmae_decoder = Transformer(
@@ -291,7 +293,10 @@ class EncoderVGGT(Encoder[EncoderVGGTCfg]):
                 gpt=self.cfg.gaussians_per_token,
                 c=self.cfg.gaussian_feature_dim,
             )
-            gaussian_feature = F.normalize(gaussian_feature, p=2, dim=-1)
+            gaussian_feature = (
+                F.normalize(gaussian_feature, p=2, dim=-1)
+                * self.feature_norm_ema.detach()
+            )
         else:
             gaussian_feature = None
 
