@@ -33,7 +33,7 @@ from pathlib import Path
 
 import modal
 
-from src.inference.modal_sam_common import (
+from src.modal_infra.modal_sam_common import (
     C3G_MODAL_WORKSPACE,
     DATASET_SPECS,
     OUTPUT_MOUNT,

@@ -13,6 +13,7 @@ from lightning.pytorch.loggers.wandb import WandbLogger
 from lightning.pytorch.strategies import DDPStrategy
 from omegaconf import DictConfig, OmegaConf
 
+from src.misc.pipeline_debug import log_startup
 from src.misc.weight_modify import checkpoint_filter_fn
 from src.model.encoder.common.gmae import remap_instill_to_qkv_checkpoint
 from src.model.distiller import get_distiller
@@ -68,6 +69,7 @@ def train(cfg_dict: DictConfig):
     if cfg_dict.wandb.mode != "disabled":
         logger = WandbLogger(
             project=cfg_dict.wandb.project,
+            entity=cfg_dict.wandb.entity,
             mode=cfg_dict.wandb.mode,
             name=cfg_dict.wandb.name,
             tags=cfg_dict.wandb.get("tags", None),

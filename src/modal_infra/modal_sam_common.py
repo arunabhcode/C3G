@@ -27,8 +27,16 @@ REPLICA_2DSEG_SCENES = [
 # Train split: scene0000_00 … scene0774_00 (775 scenes). Val then test = last 32 on volume.
 # See src/dataset/scannet_2dseg_splits.py (avoid importing src.dataset here — pulls torch).
 SCANNET_2DSEG_SCENES = [f"scene{i:04d}_00" for i in range(807 - 8 - 24)]
+# Test split: scene0783_00 … scene0806_00 (24 scenes).
+SCANNET_2DSEG_TEST_SCENES = [f"scene{i:04d}_00" for i in range(807 - 24, 807)]
 
 DatasetName = Literal["replica", "scannet"]
+
+# Vanilla SAM eval runs all Replica scenes plus ScanNet test only.
+VANILLA_EVAL_DATASETS: list[tuple[DatasetName, list[str]]] = [
+    ("replica", REPLICA_2DSEG_SCENES),
+    ("scannet", SCANNET_2DSEG_TEST_SCENES),
+]
 TrainingConfigName = Literal["feature_head_sam_prompted", "feature_head_sam"]
 TRAINING_CONFIG_PROMPTED: TrainingConfigName = "feature_head_sam_prompted"
 TRAINING_CONFIG_SAM: TrainingConfigName = "feature_head_sam"
@@ -36,6 +44,7 @@ TRAINING_CONFIG_SAM: TrainingConfigName = "feature_head_sam"
 WEIGHTS_VOLUME = "c3g-weights"
 OUTPUT_VOLUME = "c3g-train-outputs"
 SAM_EVAL_OUTPUT_VOLUME = "sam-eval-outputs"
+VANILLA_SAM_OUTPUT_VOLUME = "vanilla-sam-outputs"
 PRECOMPUTE_SAM_FEATURES_VOLUME = "precompute_sam_features"
 REPLICA_VOLUME = "replica"
 SCANNET_VOLUME = "scannet"
@@ -45,6 +54,7 @@ REPLICA_MOUNT = Path("/replica")
 SCANNET_MOUNT = Path("/scannet")
 OUTPUT_MOUNT = Path("/outputs")
 SAM_EVAL_OUTPUT_MOUNT = Path("/sam-eval-outputs")
+VANILLA_SAM_OUTPUT_MOUNT = Path("/vanilla-sam-outputs")
 PRECOMPUTE_SAM_FEATURES_MOUNT = Path("/precompute_sam_features")
 
 SAM_NUM_CHANNELS = 256
