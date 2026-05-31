@@ -261,6 +261,11 @@ def log_decoder_debug(
                 rendered_masks, embed_size, valid_region
             )
 
+    sam_overlay = colorize_masks_overlay(sam_masks[0], target_rgb_norm, (h, w))
+    rendered_overlay = colorize_masks_overlay(
+        rendered_masks[0], target_rgb_norm, (h, w)
+    )
+
     num_masks = sam_masks.shape[1]
     columns = ["target_rgb", "sam_masks_overlay", "rendered_masks_overlay"]
     for i in range(num_masks):
@@ -268,11 +273,6 @@ def log_decoder_debug(
         columns.append(f"rendered_mask_{i}")
 
     table = wandb.Table(columns=columns)
-
-    sam_overlay = colorize_masks_overlay(sam_masks[0], target_rgb_norm, (h, w))
-    rendered_overlay = colorize_masks_overlay(
-        rendered_masks[0], target_rgb_norm, (h, w)
-    )
 
     row = [
         wandb.Image(to_hwc_uint8(target_rgb_norm)),

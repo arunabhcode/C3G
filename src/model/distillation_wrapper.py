@@ -77,6 +77,7 @@ class DistillationModelWrapper(LightningModule):
         self.decoder = decoder
         self.data_shim = get_data_shim(self.encoder)
         self.losses = nn.ModuleList(losses)
+        self._last_train_debug_step_logged: int | None = None
 
         self.sam_debug_decoder = None
         if debug_decoder_cfg and debug_decoder_cfg.enabled:
@@ -265,12 +266,18 @@ class DistillationModelWrapper(LightningModule):
         if self.step_tracker is not None:
             self.step_tracker.set_step(self.global_step)
 
-        accum = self.trainer.accumulate_grad_batches or 1
-        if self.global_rank == 0 and (batch_idx + 1) % accum == 0:
+        checkpoint_interval = get_cfg()["checkpointing"]["every_n_train_steps"]
+        should_log_train_debug = (
+            self.global_rank == 0
+            and self.global_step % checkpoint_interval == 0
+            and self._last_train_debug_step_logged != self.global_step
+        )
+        if should_log_train_debug:
+            self._last_train_debug_step_logged = self.global_step
             log_debug_visualizations(
                 self.logger,
                 self.global_step,
-                get_cfg()["checkpointing"]["every_n_train_steps"],
+                checkpoint_interval,
                 batch["target"]["image"][0, 0].detach().float(),
                 target_sam[0, 0].detach().float(),
                 rendered_interp[0, 0].detach().float(),
@@ -284,7 +291,7 @@ class DistillationModelWrapper(LightningModule):
             log_decoder_debug(
                 self.logger,
                 self.global_step,
-                get_cfg()["checkpointing"]["every_n_train_steps"],
+                checkpoint_interval,
                 self.sam_debug_decoder,
                 target_sam[0, 0].detach().float(),
                 rendered_interp[0, 0].detach().float(),
@@ -300,6 +307,15 @@ class DistillationModelWrapper(LightningModule):
                 f"feature_mag = {feature_mag_loss.detach().item():.6f}",
                 flush=True,
             )
+
+        self.log(
+            "info/global_step",
+            self.global_step,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
 
         return total_loss
 

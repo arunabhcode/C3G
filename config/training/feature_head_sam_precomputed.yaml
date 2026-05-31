@@ -68,4 +68,4 @@ debug_decoder:
 
 checkpointing:
   every_n_train_steps: 50
-  save_top_k: 2
+  save_top_k: 20
