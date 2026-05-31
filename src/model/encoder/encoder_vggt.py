@@ -131,11 +131,17 @@ class EncoderVGGT(Encoder[EncoderVGGTCfg]):
                     self.cfg.feature_dim,
                     self.cfg.gaussian_feature_dim * cfg.gaussians_per_token,
                 )
+                self.magnitude_head = nn.Linear(self.cfg.feature_dim, 1)
             else:
                 self.feature_gmae_to_gaussians = nn.Linear(
                     transformer_dim,
                     self.cfg.gaussian_feature_dim * cfg.gaussians_per_token,
                 )
+                self.magnitude_head = nn.Linear(transformer_dim, 1)
+            nn.init.zeros_(self.magnitude_head.weight)
+            nn.init.constant_(
+                self.magnitude_head.bias, torch.log(torch.tensor(torch.e - 1)).item()
+            )
             self.register_buffer("feature_norm_ema", torch.ones(1))
             self.feature_norm_ema_momentum = 0.99
 
@@ -293,10 +299,13 @@ class EncoderVGGT(Encoder[EncoderVGGTCfg]):
                 gpt=self.cfg.gaussians_per_token,
                 c=self.cfg.gaussian_feature_dim,
             )
-            gaussian_feature = (
-                F.normalize(gaussian_feature, p=2, dim=-1)
-                * self.feature_norm_ema.detach().clone()
-            )
+            direction = F.normalize(gaussian_feature, p=2, dim=-1)
+            mag_raw = self.magnitude_head(
+                decoded_feature_token[:, -self.gaussian_tokens.shape[0] :]
+            ).squeeze(-1)
+            feature_norm = self.feature_norm_ema.detach().clone()
+            magnitude = F.softplus(mag_raw) * feature_norm
+            gaussian_feature = direction * magnitude.unsqueeze(-1)
         else:
             gaussian_feature = None
 
