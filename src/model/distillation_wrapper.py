@@ -34,8 +34,8 @@ def compute_feature_losses(rendered, target, eps: float = 1e-8):
 
 @dataclass
 class DistillTrainCfg:
-    feature_mse_loss_weight: float = 1.0
     feature_cosine_loss_weight: float = 1.0
+    feature_mag_loss_weight: float = 0.1
     depth_mode: DepthRenderingMode | None = None
     context_view_loss: bool = True
     random_select_context_view: bool = False
@@ -204,17 +204,20 @@ class DistillationModelWrapper(LightningModule):
             new_norm = m * self.encoder.feature_norm_ema + (1 - m) * current_norm
             self.encoder.feature_norm_ema.copy_(new_norm)
 
-        feature_mse_loss = F.mse_loss(rendered_crop, target_crop)
         feature_cosine_loss = compute_feature_losses(rendered_crop, target_crop)
 
+        rendered_mag = rendered_crop.norm(dim=2)
+        target_mag = target_crop.norm(dim=2)
+        feature_mag_loss = F.l1_loss(rendered_mag, target_mag)
+
         total_loss = (
-            self.train_cfg.feature_mse_loss_weight * feature_mse_loss
-            + self.train_cfg.feature_cosine_loss_weight * feature_cosine_loss
+            self.train_cfg.feature_cosine_loss_weight * feature_cosine_loss
+            + self.train_cfg.feature_mag_loss_weight * feature_mag_loss
         )
 
         for loss_name, loss_value in (
-            ("loss/feature_mse", feature_mse_loss),
             ("loss/feature_cosine", feature_cosine_loss),
+            ("loss/feature_magnitude", feature_mag_loss),
         ):
             self.log(
                 loss_name,
@@ -293,8 +296,8 @@ class DistillationModelWrapper(LightningModule):
             print(
                 f"train step {self.global_step} finished; "
                 f"loss = {total_loss.detach().item():.6f}; "
-                f"feature_mse = {feature_mse_loss.detach().item():.6f}; "
-                f"feature_cosine = {feature_cosine_loss.detach().item():.6f}",
+                f"feature_cosine = {feature_cosine_loss.detach().item():.6f}; "
+                f"feature_mag = {feature_mag_loss.detach().item():.6f}",
                 flush=True,
             )
 
@@ -394,7 +397,7 @@ class DistillationModelWrapper(LightningModule):
 
     def configure_optimizers(self):
         no_decay_keywords = ("bias", "LayerNorm", "layernorm", "layer_norm", "ln")
-        feature_head_keyword = ("feature_gmae_to_gaussians",)
+        feature_head_keyword = ("feature_gmae_to_gaussians", "magnitude_head")
 
         decay_params = []
         no_decay_params = []
