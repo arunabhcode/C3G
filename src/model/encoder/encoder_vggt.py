@@ -295,7 +295,7 @@ class EncoderVGGT(Encoder[EncoderVGGTCfg]):
             )
             gaussian_feature = (
                 F.normalize(gaussian_feature, p=2, dim=-1)
-                * self.feature_norm_ema.detach()
+                * self.feature_norm_ema.detach().clone()
             )
         else:
             gaussian_feature = None
