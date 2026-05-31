@@ -176,7 +176,12 @@ class EncoderVGGT(Encoder[EncoderVGGTCfg]):
 
         # Figure out the exponent.
         cfg = self.cfg.opacity_mapping
-        x = cfg.initial + min(global_step / cfg.warm_up, 1) * (cfg.final - cfg.initial)
+        if self.cfg.freeze_geometry_head:
+            x = cfg.final
+        else:
+            x = cfg.initial + min(global_step / cfg.warm_up, 1) * (
+                cfg.final - cfg.initial
+            )
         exponent = 2**x
 
         # Map the probability density to an opacity.
