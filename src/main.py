@@ -219,10 +219,10 @@ def train(cfg_dict: DictConfig):
             del ckpt_weights
 
         distill_train_cfg = DistillTrainCfg(
-            feature_mse_loss_weight=cfg.train.feature_mse_loss_weight,
             feature_cosine_loss_weight=cfg_dict.train.get(
                 "feature_cosine_loss_weight", 1.0
             ),
+            feature_mag_loss_weight=cfg_dict.train.get("feature_mag_loss_weight", 0.1),
             depth_mode=cfg.train.depth_mode,
             context_view_loss=cfg.train.context_view_loss,
         )

@@ -352,21 +352,10 @@ class DistillationModelWrapper(LightningModule):
 
         # rendered_normed = F.normalize(rendered_crop, dim=2)
         # target_normed = F.normalize(target_crop, dim=2)
-        val_mse = F.mse_loss(rendered_crop, target_crop)
+        val_mag = F.l1_loss(rendered_crop.norm(dim=2), target_crop.norm(dim=2))
         val_cosine = compute_feature_losses(rendered_crop, target_crop)
-        for loss_name, loss_value in (
-            ("val/feature_mse", val_mse),
-            ("val/feature_cosine", val_cosine),
-        ):
-            self.log(
-                loss_name,
-                loss_value,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
-                sync_dist=True,
-            )
+        self.log("val/feature_mag", val_mag, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log("val/feature_cosine", val_cosine, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
         if self.global_rank == 0:
             log_debug_visualizations(
