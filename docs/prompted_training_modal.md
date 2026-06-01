@@ -13,7 +13,7 @@ modal setup
 
 ### 2. Pretrained weights (`c3g-weights` volume)
 
-Upload checkpoints to the `c3g-weights` volume (mounted at `/weights` in training jobs). Same layout as `src/inference/modal_train_c3g_sam.py`.
+Upload checkpoints to the `c3g-weights` volume (mounted at `/weights` in training jobs). Same layout as `src/modal_infra/modal_train_c3gsam.py`.
 
 ```bash
 modal volume put c3g-weights /path/to/sam_vit_h.pth sam_vit_h.pth
@@ -85,7 +85,7 @@ Loaders: `replica_2dseg` (`src/dataset/dataset_replica_2dseg.py`), `scannet_2dse
 
 ## Training
 
-Training runs in a CUDA image built from this repo (see `src/inference/modal_train_c3g_sam.py` for volume mounts, image build, and `subprocess.run` pattern). Mount volumes:
+Training runs in a CUDA image built from this repo (see `src/modal_infra/modal_train_c3gsam.py` for volume mounts and image build). Mount volumes:
 
 | Volume | Mount | Dataset config |
 |--------|-------|----------------|
@@ -94,7 +94,7 @@ Training runs in a CUDA image built from this repo (see `src/inference/modal_tra
 | `replica` | `/replica` | `dataset.replica_2dseg.roots=[/replica]` |
 | `scannet` | `/scannet` | `dataset.scannet_2dseg.roots=[/scannet]` |
 
-Use `+training=feature_head_sam_prompted` with the `replica_2dseg` or `scannet_2dseg` dataset group (Modal CLI in `src/inference/modal_sam_common.py` sets this automatically). For non-prompted SAM feature distillation only, use `+training=feature_head_sam` instead.
+Use `+training=feature_head_sam_prompted` with the `replica_2dseg` or `scannet_2dseg` dataset group in Hydra YAML. For precomputed-feature distillation on ScanNet, use `src/modal_infra/modal_train_c3gsam.py` with `+training=feature_head_sam_precomputed`.
 
 ### Replica
 
@@ -154,61 +154,25 @@ modal secret create wandb WANDB_API_KEY=<your-key>
 checkpointing.load=/outputs/runs/sam_prompted_replica/checkpoints/last.ckpt
 ```
 
-### Modal CLI (`src/inference/modal_train_c3g_sam.py`)
+### Modal CLI
 
-Full training:
-
-```bash
-modal run src/inference/modal_train_c3g_sam.py \
-    --run-name sam_prompted_replica --dataset replica
-
-modal run src/inference/modal_train_c3g_sam.py \
-    --run-name sam_prompted_scannet --dataset scannet
-```
-
-**Training hyperparameters:** By default, Modal uses values from `config/training/feature_head_sam_prompted.yaml` (e.g. `data_loader.train.batch_size: 4`, `trainer.val_check_interval: 2000`). Override only when needed:
+**ScanNet distillation** (precomputed SAM features; Hydra YAML only, no CLI overrides):
 
 ```bash
---batch-size 4              # default: use training config (4)
---val-check-interval 2000   # default: use training config (2000)
---max-steps 5001            # default: 5001 (config has 200000 for long local runs)
+modal run src/modal_infra/modal_train_c3gsam.py --wait
+modal run src/modal_infra/modal_train_c3gsam.py::smoke --wait
 ```
 
-Modal always sets: dataset roots, weight paths on `/weights`, W&B project/name from `--run-name`, and `hydra.run.dir=/outputs/runs/<run-name>`. Smoke runs force `batch_size=1` and skip checkpointing.
-
-Smoke tests run **detached on Modal GPU** by default (no local GPU, dataset, or blocking wait). Use `--wait` to block until completion.
-
-Training smoke (one step on the first indexed scene; no checkpoint):
+**Vanilla SAM eval** (GT point prompts; no Hydra):
 
 ```bash
-modal run src/inference/modal_train_c3g_sam.py::smoke --dataset replica
-modal run src/inference/modal_train_c3g_sam.py::smoke --dataset scannet
+modal run src/modal_infra/modal_eval_sam.py::smoke --dataset replica --wait
+modal run src/modal_infra/modal_eval_sam.py --wait
 ```
 
-Follow logs: `modal app logs c3g-train-sam-feature`
+Shared volume paths live in `src/modal_infra/modal_common.py`.
 
-Eval smoke (one test batch; detached by default; requires `--resume`):
-
-```bash
-modal run src/inference/modal_c3g_sam.py::smoke --dataset replica \
-    --resume /outputs/runs/sam_prompted_replica/checkpoints/last.ckpt
-```
-
-Vanilla SAM on one dataset frame (GT point prompts; same ``PromptSampler`` as C3G training):
-
-```bash
-modal run src/inference/modal_vanilla_sam.py::smoke --dataset replica --wait
-```
-
-Full vanilla SAM eval (every frame; masks on ``sam-eval-outputs``):
-
-```bash
-modal run src/inference/modal_vanilla_sam.py::main --dataset replica --run-name vanilla_sam_replica --wait
-```
-
-Full training spawns on Modal by default (`.spawn()`); the local process returns with a `call_id` and does not block on `.remote()`. Use `--wait` to block until the job finishes. `modal run --detach` only disconnects log streaming—it does not set an entrypoint flag—so blocking behavior is controlled by `--wait`, not by the CLI `--detach` flag alone.
-
-Shared volume paths and Hydra overrides live in `src/inference/modal_sam_common.py`.
+Jobs spawn on Modal by default; use `--wait` to block until completion.
 
 ### Key training parameters
 

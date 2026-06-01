@@ -1,6 +1,6 @@
 # @package _global_
 # Modal SAM distillation (ScanNet, precomputed features). Run via:
-#   modal run src/modal_infra/modal_train_c3g_sam.py
+#   modal run src/modal_infra/modal_train_c3gsam.py
 
 defaults:
   - /dataset@_group_.scannet_distill: scannet_distill

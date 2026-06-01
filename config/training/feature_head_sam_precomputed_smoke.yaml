@@ -1,6 +1,6 @@
 # @package _global_
 # One-step smoke test on Modal (first scene). Run via:
-#   modal run src/modal_infra/modal_train_c3g_sam.py::smoke
+#   modal run src/modal_infra/modal_train_c3gsam.py::smoke
 
 defaults:
   - feature_head_sam_precomputed

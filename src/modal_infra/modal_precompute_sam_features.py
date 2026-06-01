@@ -36,7 +36,7 @@ from pathlib import Path
 
 import modal
 
-from src.modal_infra.modal_sam_common import (
+from src.modal_infra.modal_common import (
     C3G_MODAL_WORKSPACE,
     DATASET_SPECS,
     PRECOMPUTE_SAM_FEATURES_MOUNT,

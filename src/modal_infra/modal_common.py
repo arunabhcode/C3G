@@ -1,4 +1,4 @@
-"""Shared constants and helpers for C3G SAM Modal inference/training scripts."""
+"""Shared constants and helpers for C3G Modal scripts in ``src/modal_infra/``."""
 
 from __future__ import annotations
 
@@ -37,18 +37,8 @@ VANILLA_EVAL_DATASETS: list[tuple[DatasetName, list[str]]] = [
     ("replica", REPLICA_2DSEG_SCENES),
     ("scannet", SCANNET_2DSEG_TEST_SCENES),
 ]
-TrainingConfigName = Literal[
-    "feature_head_sam_prompted",
-    "feature_head_sam",
-    "feature_head_sam_precomputed",
-]
-TRAINING_CONFIG_PROMPTED: TrainingConfigName = "feature_head_sam_prompted"
-TRAINING_CONFIG_SAM: TrainingConfigName = "feature_head_sam"
-TRAINING_CONFIG_PRECOMPUTED: TrainingConfigName = "feature_head_sam_precomputed"
-
 WEIGHTS_VOLUME = "c3g-weights"
 OUTPUT_VOLUME = "c3g-train-outputs"
-SAM_EVAL_OUTPUT_VOLUME = "sam-eval-outputs"
 VANILLA_SAM_OUTPUT_VOLUME = "vanilla-sam-outputs"
 PRECOMPUTE_SAM_FEATURES_VOLUME = "precompute_sam_features"
 REPLICA_VOLUME = "replica"
@@ -58,36 +48,10 @@ WEIGHTS_MOUNT = Path("/weights")
 REPLICA_MOUNT = Path("/replica")
 SCANNET_MOUNT = Path("/scannet")
 OUTPUT_MOUNT = Path("/outputs")
-SAM_EVAL_OUTPUT_MOUNT = Path("/sam-eval-outputs")
 VANILLA_SAM_OUTPUT_MOUNT = Path("/vanilla-sam-outputs")
 PRECOMPUTE_SAM_FEATURES_MOUNT = Path("/precompute_sam_features")
 
 DEFAULT_SAM_CHECKPOINT = WEIGHTS_MOUNT / "sam_vit_h.pth"
-DEFAULT_ENCODER_WEIGHTS = WEIGHTS_MOUNT / "gaussian_decoder.ckpt"
-
-
-def resolve_encoder_pretrained_weights(override: str | Path | None = None) -> Path:
-    """Return encoder init weights from the ``c3g-weights`` volume.
-
-    Requires ``gaussian_decoder.ckpt`` (C3G Gaussian-decoder-trained encoder).
-    """
-    if override is not None:
-        path = Path(override)
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"Encoder weights not found at {path}. "
-                f"Upload to the `{WEIGHTS_VOLUME}` volume."
-            )
-        return path
-
-    if DEFAULT_ENCODER_WEIGHTS.is_file():
-        return DEFAULT_ENCODER_WEIGHTS
-
-    raise FileNotFoundError(
-        f"Missing encoder weights on `{WEIGHTS_VOLUME}` volume. "
-        f"Upload:\n"
-        f"  modal volume put {WEIGHTS_VOLUME} /path/to/gaussian_decoder.ckpt gaussian_decoder.ckpt"
-    )
 
 
 def resolve_sam_checkpoint(override: str | Path | None = None) -> Path:
@@ -102,43 +66,14 @@ def resolve_sam_checkpoint(override: str | Path | None = None) -> Path:
     return path
 
 
-def resolve_training_weights(
-    *,
-    gaussian_weights: str | Path | None = None,
-    sam_checkpoint: str | Path | None = None,
-) -> tuple[Path, Path]:
-    """Resolve SAM and encoder init paths on the ``c3g-weights`` volume."""
-    return (
-        resolve_encoder_pretrained_weights(gaussian_weights),
-        resolve_sam_checkpoint(sam_checkpoint),
-    )
-
-def dataset_group_hydra_overrides(
-    hydra_add: str,
-    training_config: TrainingConfigName,
-) -> list[str]:
-    """Add the 2dseg dataset config group (training preset has no dataset default)."""
-    _ = training_config
-    return [f"+dataset@_group_.{hydra_add}={hydra_add}"]
-
-
 DATASET_SPECS: dict[DatasetName, dict[str, str | list[str]]] = {
     "replica": {
-        "hydra_add": "replica_2dseg",
-        "dataset_cfg_key": "dataset.replica_2dseg",
-        "roots_key": "dataset.replica_2dseg.roots",
-        "overfit_key": "dataset.replica_2dseg.overfit_to_scene",
-        # Prepared flat-frame Replica dataset lives on the Modal volume mounted here.
         "default_root": str(REPLICA_MOUNT),
         "volume": REPLICA_VOLUME,
         "label": "Replica",
         "scenes": REPLICA_2DSEG_SCENES,
     },
     "scannet": {
-        "hydra_add": "scannet_2dseg",
-        "dataset_cfg_key": "dataset.scannet_2dseg",
-        "roots_key": "dataset.scannet_2dseg.roots",
-        "overfit_key": "dataset.scannet_2dseg.overfit_to_scene",
         "default_root": str(SCANNET_MOUNT),
         "volume": SCANNET_VOLUME,
         "label": "ScanNet",
@@ -277,168 +212,6 @@ def iter_dataset_frames(
     return frames
 
 
-def build_sam_train_overrides(
-    *,
-    run_name: str,
-    dataset: DatasetName,
-    dataset_root: str,
-    max_steps: int,
-    wandb_mode: str,
-    gaussian_weights: str | Path | None = None,
-    sam_checkpoint: str | Path | None = None,
-    val_interval: int | None = None,
-    batch_size: int | None = None,
-    training_config: TrainingConfigName = TRAINING_CONFIG_PROMPTED,
-    prompt_strategy: str | None = None,
-    prompted_seg_loss_weight: float | None = None,
-    min_object_pixels: int | None = None,
-    max_distance_between_context_views: int | None = None,
-    min_distance_between_context_views: int | None = None,
-    view_sampler_warm_up_steps: int | None = None,
-    resume: str | None,
-    output_mount: Path = OUTPUT_MOUNT,
-    smoke_scene: str | None = None,
-) -> list[str]:
-    encoder_weights, sam_path = resolve_training_weights(
-        gaussian_weights=gaussian_weights,
-        sam_checkpoint=sam_checkpoint,
-    )
-    spec = DATASET_SPECS[dataset]
-    run_dir = output_mount / "runs" / run_name
-    overrides = [
-        f"+training={training_config}",
-        *dataset_group_hydra_overrides(spec["hydra_add"], training_config),
-        f"wandb.mode={wandb_mode}",
-        f"wandb.project={run_name}",
-        f"wandb.name={run_name}",
-        f"hydra.run.dir={run_dir}",
-        f"trainer.max_steps={max_steps}",
-        f"model.encoder.pretrained_weights={encoder_weights}",
-        f"train.sam_checkpoint={sam_path}",
-        f"{spec['roots_key']}=[{dataset_root}]",
-    ]
-    if val_interval is not None:
-        overrides.append(f"trainer.val_check_interval={val_interval}")
-    if batch_size is not None:
-        overrides.append(f"data_loader.train.batch_size={batch_size}")
-    if max_distance_between_context_views is not None:
-        overrides.append(
-            f"{spec['dataset_cfg_key']}.view_sampler.max_distance_between_context_views={max_distance_between_context_views}"
-        )
-    if min_distance_between_context_views is not None:
-        overrides.append(
-            f"{spec['dataset_cfg_key']}.view_sampler.min_distance_between_context_views={min_distance_between_context_views}"
-        )
-    if view_sampler_warm_up_steps is not None:
-        overrides.append(
-            f"{spec['dataset_cfg_key']}.view_sampler.warm_up_steps={view_sampler_warm_up_steps}"
-        )
-    if training_config == TRAINING_CONFIG_PROMPTED:
-        if prompt_strategy is not None:
-            overrides.append(f"train.prompt_strategy={prompt_strategy}")
-        if prompted_seg_loss_weight is not None:
-            overrides.append(
-                f"train.prompted_seg_loss_weight={prompted_seg_loss_weight}"
-            )
-        if min_object_pixels is not None:
-            overrides.append(f"train.min_object_pixels={min_object_pixels}")
-    if smoke_scene is not None:
-        overrides.append(f"{spec['overfit_key']}={smoke_scene}")
-    if resume:
-        overrides.append(f"checkpointing.load={resume}")
-    if training_config == TRAINING_CONFIG_PROMPTED:
-        overrides.extend(
-            [
-                "model.encoder.freeze_backbone=true",
-                "model.encoder.freeze_instill_qk=true",
-            ]
-        )
-    return overrides
-
-
-def build_prompted_train_overrides(
-    *,
-    run_name: str,
-    dataset: DatasetName,
-    dataset_root: str,
-    max_steps: int,
-    wandb_mode: str,
-    gaussian_weights: str | Path | None = None,
-    sam_checkpoint: str | Path | None = None,
-    val_interval: int | None = None,
-    batch_size: int | None = None,
-    prompt_strategy: str | None = None,
-    prompted_seg_loss_weight: float | None = None,
-    min_object_pixels: int | None = None,
-    max_distance_between_context_views: int | None = None,
-    min_distance_between_context_views: int | None = None,
-    view_sampler_warm_up_steps: int | None = None,
-    resume: str | None,
-    output_mount: Path = OUTPUT_MOUNT,
-    smoke_scene: str | None = None,
-) -> list[str]:
-    """Hydra overrides for prompted SAM training on ``replica_2dseg`` / ``scannet_2dseg``."""
-    return build_sam_train_overrides(
-        run_name=run_name,
-        dataset=dataset,
-        dataset_root=dataset_root,
-        max_steps=max_steps,
-        wandb_mode=wandb_mode,
-        gaussian_weights=gaussian_weights,
-        sam_checkpoint=sam_checkpoint,
-        val_interval=val_interval,
-        batch_size=batch_size,
-        training_config=TRAINING_CONFIG_PROMPTED,
-        prompt_strategy=prompt_strategy,
-        prompted_seg_loss_weight=prompted_seg_loss_weight,
-        min_object_pixels=min_object_pixels,
-        max_distance_between_context_views=max_distance_between_context_views,
-        min_distance_between_context_views=min_distance_between_context_views,
-        view_sampler_warm_up_steps=view_sampler_warm_up_steps,
-        resume=resume,
-        output_mount=output_mount,
-        smoke_scene=smoke_scene,
-    )
-
-
-def build_prompted_test_overrides(
-    *,
-    run_name: str,
-    dataset: DatasetName,
-    dataset_root: str,
-    checkpoint_path: str,
-    sam_checkpoint: str | Path | None = None,
-    wandb_mode: str = "disabled",
-    training_config: TrainingConfigName = TRAINING_CONFIG_PROMPTED,
-    smoke_scene: str | None = None,
-    output_mount: Path = SAM_EVAL_OUTPUT_MOUNT,
-) -> list[str]:
-    sam_path = resolve_sam_checkpoint(sam_checkpoint)
-    spec = DATASET_SPECS[dataset]
-    run_dir = output_mount / "runs" / run_name
-    pred_root = output_mount / "runs"
-    overrides = [
-        f"+training={training_config}",
-        *dataset_group_hydra_overrides(spec["hydra_add"], training_config),
-        "mode=test",
-        f"wandb.mode={wandb_mode}",
-        f"wandb.project={run_name}",
-        f"wandb.name={run_name}",
-        f"hydra.run.dir={run_dir}",
-        f"test.output_path={pred_root}",
-        f"train.sam_checkpoint={sam_path}",
-        f"{spec['roots_key']}=[{dataset_root}]",
-        "test.save_compare=true",
-        "test.save_image=false",
-        "test.save_video=false",
-        f"checkpointing.load={checkpoint_path}",
-        "trainer.limit_test_batches=1",
-    ]
-    if smoke_scene is not None:
-        overrides.append(f"{spec['overfit_key']}={smoke_scene}")
-    return overrides
-
-
 C3G_MODAL_WORKSPACE = Path("/workspace")
 C3G_MODAL_PYTHON = "3.12"
 VANILLA_SAM_MODAL_ROOT = Path("/root")
@@ -447,12 +220,12 @@ PYTORCH_CU124_INDEX = "https://download.pytorch.org/whl/cu124"
 MODAL_UV_PATH = "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
-def build_vanilla_sam_modal_image(
+def build_eval_sam_modal_image(
     *,
     src_root: Path | None = None,
     remote_root: Path = VANILLA_SAM_MODAL_ROOT,
 ):
-    """Lightweight image for vanilla SAM inference on Modal (``uv pip install``)."""
+    """Lightweight image for ``modal_eval_sam`` (``uv pip install``)."""
     import modal
 
     # Resolve from this file so local dev and vanilla Modal workers (/root/src) both work

@@ -9,14 +9,14 @@ Prerequisites (once)::
     # ScanNet frames on ``scannet`` volume; precomputed ``*_sam.pt`` on
     # ``precompute_sam_features`` at ``scannet/`` (see modal_precompute_sam_features.py).
 
-Training (ScanNet only; Hydra YAML, no CLI overrides)::
+Training (Hydra YAML only)::
 
-    modal run src/modal_infra/modal_train_c3g_sam.py
-    modal run src/modal_infra/modal_train_c3g_sam.py --wait
+    modal run src/modal_infra/modal_train_c3gsam.py
+    modal run src/modal_infra/modal_train_c3gsam.py --wait
 
 Smoke (one optimizer step)::
 
-    modal run src/modal_infra/modal_train_c3g_sam.py::smoke --wait
+    modal run src/modal_infra/modal_train_c3gsam.py::smoke --wait
 
 Checkpoints: ``c3g-train-outputs`` volume at ``/outputs/runs/<wandb.name>/``.
 """
@@ -28,7 +28,7 @@ import subprocess
 
 import modal
 
-from src.modal_infra.modal_sam_common import (
+from src.modal_infra.modal_common import (
     C3G_MODAL_WORKSPACE,
     OUTPUT_MOUNT,
     OUTPUT_VOLUME,
@@ -63,10 +63,6 @@ VOLUMES = {
 }
 
 
-def _train_cmd(training_config: str) -> list[str]:
-    return ["python", "-m", "src.main", f"+training={training_config}"]
-
-
 @app.function(
     image=build_c3g_modal_image(),
     gpu="T4",
@@ -75,7 +71,7 @@ def _train_cmd(training_config: str) -> list[str]:
     volumes=VOLUMES,
 )
 def train_sam_precomputed(training_config: str = TRAINING_CONFIG) -> str:
-    """Run ``src.main`` with the given ``+training=`` config (YAML-only)."""
+    """Run ``src.main`` with ``+training=<config>`` (YAML-only, no CLI overrides)."""
     if training_config == TRAINING_CONFIG and not os.environ.get("WANDB_API_KEY"):
         raise RuntimeError(
             "feature_head_sam_precomputed sets wandb.mode=online. "
@@ -83,7 +79,7 @@ def train_sam_precomputed(training_config: str = TRAINING_CONFIG) -> str:
             "Or use the smoke entrypoint (wandb disabled)."
         )
 
-    cmd = _train_cmd(training_config)
+    cmd = ["python", "-m", "src.main", f"+training={training_config}"]
     print("Running:", " ".join(cmd))
     print(f"Outputs on volume `{OUTPUT_VOLUME}` under {OUTPUT_MOUNT / 'runs'}")
     subprocess.run(cmd, check=True, cwd=str(C3G_MODAL_WORKSPACE))
