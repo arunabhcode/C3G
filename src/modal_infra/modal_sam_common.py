@@ -447,50 +447,6 @@ PYTORCH_CU124_INDEX = "https://download.pytorch.org/whl/cu124"
 MODAL_UV_PATH = "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
-def modal_install_commands(
-    *, workspace: Path = C3G_MODAL_WORKSPACE, python_version: str = C3G_MODAL_PYTHON
-) -> list[str]:
-    """Install the repo into the Modal image with ``uv pip install``."""
-    return [
-        f"uv pip install --python {python_version} -e {workspace}",
-    ]
-
-
-def vanilla_sam_install_commands(
-    *, python_version: str = VANILLA_SAM_PYTHON
-) -> list[str]:
-    """Install vanilla SAM inference deps with ``uv pip install``."""
-    py = python_version
-    return [
-        (
-            f"uv pip install --python {py} "
-            "numpy==1.26.4 pillow==11.0.0 fastapi==0.118.0 pydantic==2.11.4"
-        ),
-        (
-            f"uv pip install --python {py} torch==2.5.1 torchvision==0.20.1 "
-            f"--index-url {PYTORCH_CU124_INDEX}"
-        ),
-        (
-            f'uv pip install --python {py} '
-            f'"segment-anything @ git+https://github.com/facebookresearch/segment-anything.git"'
-        ),
-    ]
-
-
-def repo_root_for_modal(start: Path | None = None) -> Path:
-    """Locate the repo root when running locally or inside a Modal container."""
-    here = (start or Path(__file__)).resolve()
-    for candidate in (here.parent, *here.parents):
-        if (candidate / "pyproject.toml").is_file() and (candidate / "src").is_dir():
-            return candidate
-
-    workspace = C3G_MODAL_WORKSPACE
-    if (workspace / "pyproject.toml").is_file() and (workspace / "src").is_dir():
-        return workspace
-
-    raise RuntimeError(f"Could not find repo root from {here}")
-
-
 def build_vanilla_sam_modal_image(
     *,
     src_root: Path | None = None,
@@ -507,7 +463,14 @@ def build_vanilla_sam_modal_image(
         .apt_install("git", "ca-certificates", "curl")
         .run_commands("curl -LsSf https://astral.sh/uv/install.sh | sh")
         .env({"PATH": MODAL_UV_PATH})
-        .run_commands(*vanilla_sam_install_commands())
+        .run_commands(
+            f"uv pip install --system --python {VANILLA_SAM_PYTHON} "
+            "numpy==1.26.4 pillow==11.0.0 fastapi==0.118.0 pydantic==2.11.4",
+            f"uv pip install --system --python {VANILLA_SAM_PYTHON} "
+            f"torch==2.5.1 torchvision==0.20.1 --index-url {PYTORCH_CU124_INDEX}",
+            f"uv pip install --system --python {VANILLA_SAM_PYTHON} "
+            '"segment-anything @ git+https://github.com/facebookresearch/segment-anything.git"',
+        )
         .env({"PYTHONPATH": str(remote_root)})
         .add_local_dir(
             str(src),
@@ -525,7 +488,18 @@ def build_c3g_modal_image(
     """CUDA image for C3G on Modal: copy repo to ``/workspace`` and ``uv pip install -e``."""
     import modal
 
-    root = repo_root or repo_root_for_modal()
+    if repo_root is None:
+        here = Path(__file__).resolve()
+        for candidate in (here.parent, *here.parents):
+            if (candidate / "pyproject.toml").is_file() and (candidate / "src").is_dir():
+                repo_root = candidate
+                break
+        else:
+            if (workspace / "pyproject.toml").is_file() and (workspace / "src").is_dir():
+                repo_root = workspace
+            else:
+                raise RuntimeError(f"Could not find repo root from {here}")
+
     python_version = C3G_MODAL_PYTHON
     return (
         modal.Image.from_registry(
@@ -552,7 +526,7 @@ def build_c3g_modal_image(
             }
         )
         .add_local_dir(
-            str(root),
+            str(repo_root),
             remote_path=str(workspace),
             copy=True,
             ignore=[
@@ -566,6 +540,8 @@ def build_c3g_modal_image(
             ],
         )
         .workdir(str(workspace))
-        .run_commands(*modal_install_commands(workspace=workspace, python_version=python_version))
+        .run_commands(
+            f"cd {workspace} && uv pip install --system --python {python_version} -e ."
+        )
         .env({"PYTHONPATH": str(workspace)})
     )

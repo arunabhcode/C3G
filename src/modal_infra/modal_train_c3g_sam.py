@@ -64,15 +64,7 @@ VOLUMES = {
 
 
 def _train_cmd(training_config: str) -> list[str]:
-    return [
-        "uv",
-        "run",
-        "--no-sync",
-        "python",
-        "-m",
-        "src.main",
-        f"+training={training_config}",
-    ]
+    return ["python", "-m", "src.main", f"+training={training_config}"]
 
 
 @app.function(

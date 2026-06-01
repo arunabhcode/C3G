@@ -67,19 +67,6 @@ precompute_volume = modal.Volume.from_name(
 )
 
 
-def _validate_dataset_root(dataset: DatasetName, dataset_root: str) -> None:
-    spec = DATASET_SPECS[dataset]
-    if not Path(dataset_root).is_dir():
-        raise FileNotFoundError(
-            f"{spec['label']} dataset not found at {dataset_root}. "
-            f"Populate the `{spec['volume']}` volume via the download script."
-        )
-
-
-def _output_root_for_dataset(dataset: DatasetName) -> Path:
-    return PRECOMPUTE_SAM_FEATURES_MOUNT / dataset
-
-
 @app.function(
     image=build_c3g_modal_image(),
     gpu="H200",
@@ -101,10 +88,15 @@ def precompute_sam_features(
     smoke: bool = False,
 ) -> str:
     """Run ``scripts/precompute_sam_features.py`` on a Modal GPU."""
+    spec = DATASET_SPECS[dataset]
     input_root = resolve_dataset_root(dataset, dataset_root)
-    _validate_dataset_root(dataset, input_root)
+    if not Path(input_root).is_dir():
+        raise FileNotFoundError(
+            f"{spec['label']} dataset not found at {input_root}. "
+            f"Populate the `{spec['volume']}` volume via the download script."
+        )
 
-    output_root = _output_root_for_dataset(dataset)
+    output_root = PRECOMPUTE_SAM_FEATURES_MOUNT / dataset
     output_root.mkdir(parents=True, exist_ok=True)
 
     sam_path = resolve_sam_checkpoint(sam_checkpoint)
@@ -116,9 +108,6 @@ def precompute_sam_features(
         print(f"Smoke scene: {smoke_scene}")
 
     cmd = [
-        "uv",
-        "run",
-        "--no-sync",
         "python",
         "scripts/precompute_sam_features.py",
         "--dataset-root",
