@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Modal runner for C3G SAM distillation with precomputed features.
+"""Modal runner for ScanNet SAM distillation with precomputed features.
+
+ScanNet only (see ``config/training/feature_head_sam_precomputed.yaml``).
 
 Prerequisites (once)::
 
     modal volume put c3g-weights /path/to/gaussian_decoder.ckpt gaussian_decoder.ckpt
-    modal run src/modal_infra/modal_precompute_sam_features.py::main --dataset scannet
+    # ScanNet frames on ``scannet`` volume; precomputed ``*_sam.pt`` on
+    # ``precompute_sam_features`` at ``scannet/`` (see modal_precompute_sam_features.py).
 
-Training uses Hydra config only (no CLI overrides)::
+Training (ScanNet only; Hydra YAML, no CLI overrides)::
 
     modal run src/modal_infra/modal_train_c3g_sam.py
     modal run src/modal_infra/modal_train_c3g_sam.py --wait
@@ -31,8 +34,6 @@ from src.modal_infra.modal_sam_common import (
     OUTPUT_VOLUME,
     PRECOMPUTE_SAM_FEATURES_MOUNT,
     PRECOMPUTE_SAM_FEATURES_VOLUME,
-    REPLICA_MOUNT,
-    REPLICA_VOLUME,
     SCANNET_MOUNT,
     SCANNET_VOLUME,
     WEIGHTS_MOUNT,
@@ -48,7 +49,6 @@ WANDB_SECRET = modal.Secret.from_name("wandb")
 
 app = modal.App(APP_NAME)
 weights_volume = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
-replica_volume = modal.Volume.from_name(REPLICA_VOLUME, create_if_missing=True)
 scannet_volume = modal.Volume.from_name(SCANNET_VOLUME, create_if_missing=True)
 precompute_volume = modal.Volume.from_name(
     PRECOMPUTE_SAM_FEATURES_VOLUME, create_if_missing=True
@@ -57,7 +57,6 @@ output_volume = modal.Volume.from_name(OUTPUT_VOLUME, create_if_missing=True)
 
 VOLUMES = {
     str(WEIGHTS_MOUNT): weights_volume,
-    str(REPLICA_MOUNT): replica_volume,
     str(SCANNET_MOUNT): scannet_volume,
     str(PRECOMPUTE_SAM_FEATURES_MOUNT): precompute_volume,
     str(OUTPUT_MOUNT): output_volume,
@@ -102,14 +101,14 @@ def train_sam_precomputed(training_config: str = TRAINING_CONFIG) -> str:
 
 @app.local_entrypoint()
 def main(detach: bool | None = None, wait: bool = False) -> None:
-    """Full SAM distillation training (see ``config/training/feature_head_sam_precomputed.yaml``)."""
+    """Full ScanNet SAM distillation (``config/training/feature_head_sam_precomputed.yaml``)."""
     from src.misc.modal_run import dispatch_remote
 
     dispatch_remote(
         train_sam_precomputed,
         training_config=TRAINING_CONFIG,
         detach=resolve_detach(detach=detach, remote_job=not wait),
-        job_name="C3G SAM distill train",
+        job_name="C3G SAM ScanNet distill train",
         app_name=APP_NAME,
     )
 
@@ -123,6 +122,6 @@ def smoke(detach: bool | None = None, wait: bool = False) -> None:
         train_sam_precomputed,
         training_config=SMOKE_TRAINING_CONFIG,
         detach=resolve_detach(detach=detach, remote_job=not wait),
-        job_name="C3G SAM distill smoke",
+        job_name="C3G SAM ScanNet distill smoke",
         app_name=APP_NAME,
     )
