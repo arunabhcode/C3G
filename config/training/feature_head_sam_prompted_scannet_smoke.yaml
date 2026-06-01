@@ -1,13 +1,13 @@
 # @package _global_
 # One-step smoke test on Modal (first scene). Run via:
 #   modal run src/modal_infra/modal_train_c3gsam.py::smoke
-#   modal run src/modal_infra/modal_train_c3gsam.py::smoke --experiment distillation
+#   modal run src/modal_infra/modal_train_c3gsam.py::smoke --experiment prompted
 
 defaults:
-  - feature_head_sam_precomputed
+  - feature_head_sam_prompted_scannet
 
 wandb:
-  name: sam_distill_scannet_smoke
+  name: sam_prompted_scannet_smoke
   mode: disabled
 
 hydra:
@@ -15,7 +15,7 @@ hydra:
     dir: /outputs/runs/${wandb.name}
 
 dataset:
-  scannet_distill:
+  scannet_2dseg:
     overfit_to_scene: scene0000_00
 
 trainer:

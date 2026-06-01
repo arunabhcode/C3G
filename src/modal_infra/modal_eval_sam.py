@@ -388,7 +388,7 @@ def _eval_labeled_frames(
         str(SCANNET_MOUNT): scannet_volume,
         str(VANILLA_SAM_OUTPUT_MOUNT): vanilla_output_volume,
     },
-    timeout=60 * 60 * 2,
+    timeout=60 * 60 * 24,
     scaledown_window=300,
 )
 class VanillaSAMInference:

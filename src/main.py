@@ -325,6 +325,18 @@ def train(cfg_dict: DictConfig):
 
             del ckpt_weights
 
+        debug_decoder_cfg = None
+        if cfg_dict.get("debug_decoder", {}).get("enabled", False):
+            debug_decoder_cfg = DebugDecoderCfg(
+                enabled=True,
+                sam_checkpoint=cfg_dict.debug_decoder.get(
+                    "sam_checkpoint", cfg.train.sam_checkpoint
+                ),
+                sam_model_variant=cfg_dict.debug_decoder.get(
+                    "sam_model_variant", cfg.train.sam_model_variant
+                ),
+            )
+
         model_wrapper = ModelWrapper(
             cfg.optimizer,
             cfg.test,
@@ -340,6 +352,7 @@ def train(cfg_dict: DictConfig):
             lseg_feature_extractor=lseg_feature_extractor,
             sam_encoder=sam_encoder,
             mode=cfg.mode,
+            debug_decoder_cfg=debug_decoder_cfg,
         )
     data_module = DataModule(
         cfg.dataset,

@@ -94,7 +94,7 @@ Training runs in a CUDA image built from this repo (see `src/modal_infra/modal_t
 | `replica` | `/replica` | `dataset.replica_2dseg.roots=[/replica]` |
 | `scannet` | `/scannet` | `dataset.scannet_2dseg.roots=[/scannet]` |
 
-Use `+training=feature_head_sam_prompted` with the `replica_2dseg` or `scannet_2dseg` dataset group in Hydra YAML. For precomputed-feature distillation on ScanNet, use `src/modal_infra/modal_train_c3gsam.py` with `+training=feature_head_sam_precomputed`.
+Use `+training=feature_head_sam_prompted` with the `replica_2dseg` or `scannet_2dseg` dataset group in Hydra YAML for local runs. On Modal, use `src/modal_infra/modal_train_c3gsam.py` with `--experiment prompted` (Hydra preset `feature_head_sam_prompted_scannet`) or `--experiment distillation` for precomputed features (`feature_head_sam_precomputed`).
 
 ### Replica
 
@@ -156,11 +156,13 @@ checkpointing.load=/outputs/runs/sam_prompted_replica/checkpoints/last.ckpt
 
 ### Modal CLI
 
-**ScanNet distillation** (precomputed SAM features; Hydra YAML only, no CLI overrides):
+**ScanNet training** (Hydra ``+training=`` only; select experiment via CLI):
 
 ```bash
 modal run src/modal_infra/modal_train_c3gsam.py --wait
+modal run src/modal_infra/modal_train_c3gsam.py --experiment prompted --wait
 modal run src/modal_infra/modal_train_c3gsam.py::smoke --wait
+modal run src/modal_infra/modal_train_c3gsam.py::smoke --experiment prompted --wait
 ```
 
 **Vanilla SAM eval** (GT point prompts; no Hydra):

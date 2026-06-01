@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-"""Modal runner for ScanNet SAM distillation with precomputed features.
-
-ScanNet only (see ``config/training/feature_head_sam_precomputed.yaml``).
+"""Modal runner for ScanNet SAM training (distillation or prompted).
 
 Prerequisites (once)::
 
     modal volume put c3g-weights /path/to/gaussian_decoder.ckpt gaussian_decoder.ckpt
-    # ScanNet frames on ``scannet`` volume; precomputed ``*_sam.pt`` on
-    # ``precompute_sam_features`` at ``scannet/`` (see modal_precompute_sam_features.py).
+    modal volume put c3g-weights /path/to/sam_vit_h.pth sam_vit_h.pth
+    # ScanNet frames on ``scannet`` volume.
+    # Distillation only: precomputed ``*_sam.pt`` on ``precompute_sam_features`` at
+    # ``scannet/`` (see modal_precompute_sam_features.py).
 
-Training (Hydra YAML only)::
+Training (Hydra ``+training=`` only; pick experiment via CLI)::
 
     modal run src/modal_infra/modal_train_c3gsam.py
-    modal run src/modal_infra/modal_train_c3gsam.py --wait
+    modal run src/modal_infra/modal_train_c3gsam.py --experiment prompted --wait
 
 Smoke (one optimizer step)::
 
     modal run src/modal_infra/modal_train_c3gsam.py::smoke --wait
+    modal run src/modal_infra/modal_train_c3gsam.py::smoke --experiment prompted --wait
 
 Checkpoints: ``c3g-train-outputs`` volume at ``/outputs/runs/<wandb.name>/``.
 """
@@ -25,6 +26,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
+from typing import Literal
 
 import modal
 
@@ -42,9 +45,19 @@ from src.modal_infra.modal_common import (
     resolve_detach,
 )
 
+ExperimentKind = Literal["distillation", "prompted"]
+
+TRAINING_CONFIG_BY_EXPERIMENT: dict[ExperimentKind, str] = {
+    "distillation": "feature_head_sam_precomputed",
+    "prompted": "feature_head_sam_prompted_scannet",
+}
+SMOKE_TRAINING_CONFIG_BY_EXPERIMENT: dict[ExperimentKind, str] = {
+    "distillation": "feature_head_sam_precomputed_smoke",
+    "prompted": "feature_head_sam_prompted_scannet_smoke",
+}
+FULL_TRAINING_CONFIGS = frozenset(TRAINING_CONFIG_BY_EXPERIMENT.values())
+
 APP_NAME = "c3g-sam-precomputed-train"
-TRAINING_CONFIG = "feature_head_sam_precomputed"
-SMOKE_TRAINING_CONFIG = "feature_head_sam_precomputed_smoke"
 WANDB_SECRET = modal.Secret.from_name("wandb")
 
 app = modal.App(APP_NAME)
@@ -63,6 +76,24 @@ VOLUMES = {
 }
 
 
+def resolve_training_config(
+    experiment: str, *, smoke: bool = False
+) -> str:
+    if experiment not in TRAINING_CONFIG_BY_EXPERIMENT:
+        choices = ", ".join(TRAINING_CONFIG_BY_EXPERIMENT)
+        print(
+            f"Unknown experiment {experiment!r}; choose one of: {choices}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    mapping = (
+        SMOKE_TRAINING_CONFIG_BY_EXPERIMENT
+        if smoke
+        else TRAINING_CONFIG_BY_EXPERIMENT
+    )
+    return mapping[experiment]  # type: ignore[index]
+
+
 @app.function(
     image=build_c3g_modal_image(),
     gpu="B200",
@@ -70,11 +101,13 @@ VOLUMES = {
     secrets=[WANDB_SECRET],
     volumes=VOLUMES,
 )
-def train_sam_precomputed(training_config: str = TRAINING_CONFIG) -> str:
+def train_sam(training_config: str) -> str:
     """Run ``src.main`` with ``+training=<config>`` (YAML-only, no CLI overrides)."""
-    if training_config == TRAINING_CONFIG and not os.environ.get("WANDB_API_KEY"):
+    if training_config in FULL_TRAINING_CONFIGS and not os.environ.get(
+        "WANDB_API_KEY"
+    ):
         raise RuntimeError(
-            "feature_head_sam_precomputed sets wandb.mode=online. "
+            f"{training_config} sets wandb.mode=online. "
             "Create a Modal secret: modal secret create wandb WANDB_API_KEY=<key> "
             "Or use the smoke entrypoint (wandb disabled)."
         )
@@ -88,28 +121,46 @@ def train_sam_precomputed(training_config: str = TRAINING_CONFIG) -> str:
 
 
 @app.local_entrypoint()
-def main(detach: bool | None = None, wait: bool = False) -> None:
-    """Full ScanNet SAM distillation (``config/training/feature_head_sam_precomputed.yaml``)."""
+def main(
+    experiment: ExperimentKind = "distillation",
+    detach: bool | None = None,
+    wait: bool = False,
+) -> None:
+    """Full ScanNet SAM training for ``distillation`` or ``prompted``."""
     from src.misc.modal_run import dispatch_remote
 
+    training_config = resolve_training_config(experiment, smoke=False)
+    job_labels = {
+        "distillation": "C3G SAM ScanNet distill train",
+        "prompted": "C3G SAM ScanNet prompted train",
+    }
     dispatch_remote(
-        train_sam_precomputed,
-        training_config=TRAINING_CONFIG,
+        train_sam,
+        training_config=training_config,
         detach=resolve_detach(detach=detach, remote_job=not wait),
-        job_name="C3G SAM ScanNet distill train",
+        job_name=job_labels[experiment],
         app_name=APP_NAME,
     )
 
 
 @app.local_entrypoint()
-def smoke(detach: bool | None = None, wait: bool = False) -> None:
-    """One optimizer-step smoke test (``feature_head_sam_precomputed_smoke.yaml``)."""
+def smoke(
+    experiment: ExperimentKind = "distillation",
+    detach: bool | None = None,
+    wait: bool = False,
+) -> None:
+    """One optimizer-step smoke test for ``distillation`` or ``prompted``."""
     from src.misc.modal_run import dispatch_remote
 
+    training_config = resolve_training_config(experiment, smoke=True)
+    job_labels = {
+        "distillation": "C3G SAM ScanNet distill smoke",
+        "prompted": "C3G SAM ScanNet prompted smoke",
+    }
     dispatch_remote(
-        train_sam_precomputed,
-        training_config=SMOKE_TRAINING_CONFIG,
+        train_sam,
+        training_config=training_config,
         detach=resolve_detach(detach=detach, remote_job=not wait),
-        job_name="C3G SAM ScanNet distill smoke",
+        job_name=job_labels[experiment],
         app_name=APP_NAME,
     )

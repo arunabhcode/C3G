@@ -1,29 +1,30 @@
 # @package _global_
-# Modal SAM distillation (ScanNet, precomputed features). Run via:
-#   modal run src/modal_infra/modal_train_c3gsam.py
-#   modal run src/modal_infra/modal_train_c3gsam.py --experiment distillation
+# Modal prompted SAM training (ScanNet, live SAM). Run via:
+#   modal run src/modal_infra/modal_train_c3gsam.py --experiment prompted
 
 defaults:
-  - /dataset@_group_.scannet_distill: scannet_distill
+  - /dataset@_group_.scannet_2dseg: scannet_2dseg
   - override /model/encoder: noposplat
   - override /model/encoder/backbone: croco
-  - override /loss: [mse]
+  - override /loss: []
+
+loss: {}
 
 wandb:
   mode: online
   entity: vrshy-stanford
-  project: distillation-training-full
-  name: sam_distill_scannet
-  tags: [scannet, 224x224, sam, precomputed, distillation, modal]
+  project: c3g-sam-base-full
+  name: sam_prompted_scannet
+  tags: [scannet, 224x224, sam, prompted, modal]
 
 hydra:
   run:
     dir: /outputs/runs/${wandb.name}
 
 dataset:
-  scannet_distill:
+  scannet_2dseg:
     roots: [/scannet]
-    sam_features_root: /precompute_sam_features/scannet
+    input_image_shape: [224, 224]
 
 model:
   encoder:
@@ -51,7 +52,7 @@ model:
     feature_detach: true
 
 optimizer:
-  lr: 1.5e-5
+  lr: 1e-5
   warm_up_steps: 100
   weight_decay: 0.05
   feature_head_weight_decay: 0.01
@@ -61,24 +62,31 @@ data_loader:
     batch_size: 6
 
 train:
-  pipeline: distillation
-  feature_cosine_loss_weight: 1.0
-  feature_mag_loss_weight: 0.5
   context_view_loss: true
+  prompt_mode: prompted
+  prompted_seg_loss_weight: 0.1
+  prompt_strategy: centroid
+  min_object_pixels: 16
+  reproj_model: sam
+  feature_rendering_loss: 1.0
+  sam_model_variant: sam_vit_h
+  sam_checkpoint: /weights/sam_vit_h.pth
+  use_lora: false
+  lora_rank: 4
 
 trainer:
   max_steps: 5001
   val_check_interval: 500
-  accumulate_grad_batches: 2
+  accumulate_grad_batches: 6
   log_every_n_steps: 1
   devices: 1
   num_sanity_val_steps: 0
+
+checkpointing:
+  every_n_train_steps: 50
+  save_top_k: 20
 
 debug_decoder:
   enabled: true
   sam_checkpoint: /weights/sam_vit_h.pth
   sam_model_variant: sam_vit_h
-
-checkpointing:
-  every_n_train_steps: 50
-  save_top_k: 20

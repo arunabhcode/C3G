@@ -63,6 +63,8 @@ from ..loss.loss_segmentation_prompted import (
     LossSegmentationPromptedCfg,
     LossSegmentationPromptedCfgWrapper,
 )
+from .debug_visualizer import log_debug_visualizations, log_decoder_debug
+from .distillation_wrapper import DebugDecoderCfg
 from .sam.constants import SAM_IMAGE_SIZE
 
 _REPLICA_SAM_DUAL_RES_MSG = (
@@ -181,6 +183,7 @@ class ModelWrapper(LightningModule):
         clip=None,
         sam_encoder=None,
         mode: str = "train",
+        debug_decoder_cfg: DebugDecoderCfg | None = None,
     ) -> None:
         super().__init__()
         self.optimizer_cfg = optimizer_cfg
@@ -235,6 +238,23 @@ class ModelWrapper(LightningModule):
         else:
             self.prompted_segmentation_loss = None
 
+        self.debug_decoder_enabled = bool(
+            debug_decoder_cfg and debug_decoder_cfg.enabled
+        )
+        self.sam_debug_decoder = None
+        self._last_train_debug_step_logged: int | None = None
+        if self.debug_decoder_enabled and self.prompted_segmentation_loss is None:
+            from .sam_decoder import SAMMaskDecoderWrapper
+
+            assert debug_decoder_cfg is not None
+            self.sam_debug_decoder = SAMMaskDecoderWrapper(
+                debug_decoder_cfg.sam_checkpoint,
+                model_variant=debug_decoder_cfg.sam_model_variant,
+            )
+            self.sam_debug_decoder.eval()
+            for p in self.sam_debug_decoder.parameters():
+                p.requires_grad = False
+
         # This is used for testing.
         self.benchmarker = Benchmarker()
         self.miou = JaccardIndex(
@@ -268,6 +288,86 @@ class ModelWrapper(LightningModule):
             f"(~{accum} heavy micro-batches per optimizer step), "
             f"log_every_n_steps={self.trainer.log_every_n_steps}",
             flush=True,
+        )
+
+    def _should_log_debug_visualizations(self) -> bool:
+        if not self.debug_decoder_enabled:
+            return False
+        trainer = getattr(self, "trainer", None)
+        if trainer is not None and getattr(trainer, "sanity_checking", False):
+            return False
+        return True
+
+    def _get_sam_debug_decoder(self):
+        if self.prompted_segmentation_loss is not None:
+            return self.prompted_segmentation_loss.mask_decoder
+        return self.sam_debug_decoder
+
+    @torch.no_grad()
+    def _maybe_log_sam_debug_visualizations(
+        self,
+        batch: BatchedExample,
+        output,
+        h: int,
+        w: int,
+        *,
+        prefix: str,
+    ) -> None:
+        if not self._should_log_debug_visualizations():
+            return
+        if output.feature is None:
+            return
+
+        tgt_sam = batch["target"].get("sam_image")
+        if tgt_sam is None:
+            return
+
+        sam_decoder = self._get_sam_debug_decoder()
+        if sam_decoder is None:
+            return
+
+        target_sam = self.forward_foundation_model(
+            batch["target"]["image"] * 2 - 1,
+            interpolate=False,
+            sam_image=tgt_sam * 2 - 1,
+        )[0, 0].detach().float()
+
+        rendered = output.feature[0, 0].detach().float()
+        rendered_interp = F.interpolate(
+            rendered.unsqueeze(0),
+            size=target_sam.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0)
+
+        valid_h, valid_w = target_sam.shape[-2], target_sam.shape[-1]
+        checkpoint_interval = get_cfg()["checkpointing"]["every_n_train_steps"]
+
+        log_debug_visualizations(
+            self.logger,
+            self.global_step,
+            checkpoint_interval,
+            batch["target"]["image"][0, 0].detach().float(),
+            target_sam,
+            rendered_interp,
+            (h, w),
+            prefix=prefix,
+            valid_region=(valid_h, valid_w),
+            rendered_rgb=output.color[0, 0].detach().float()
+            if output.color is not None
+            else None,
+        )
+        log_decoder_debug(
+            self.logger,
+            self.global_step,
+            checkpoint_interval,
+            sam_decoder,
+            target_sam,
+            rendered_interp,
+            batch["target"]["image"][0, 0].detach().float(),
+            (h, w),
+            prefix=prefix,
+            valid_region=(valid_h, valid_w),
         )
 
     @rank_zero_only
@@ -708,6 +808,18 @@ class ModelWrapper(LightningModule):
             prog_bar=True,
             logger=True,
         )
+
+        checkpoint_interval = get_cfg()["checkpointing"]["every_n_train_steps"]
+        should_log_train_debug = (
+            self.global_rank == 0
+            and self.global_step % checkpoint_interval == 0
+            and self._last_train_debug_step_logged != self.global_step
+        )
+        if should_log_train_debug and self._should_log_debug_visualizations():
+            self._last_train_debug_step_logged = self.global_step
+            self._maybe_log_sam_debug_visualizations(
+                batch, output, h, w, prefix="train"
+            )
 
         # Tell the data loader processes about the current step.
         if self.step_tracker is not None:
@@ -1567,6 +1679,11 @@ class ModelWrapper(LightningModule):
                     on_epoch=True,
                     logger=True,
                 )
+
+        if self.global_rank == 0:
+            self._maybe_log_sam_debug_visualizations(
+                batch, output, h, w, prefix="val"
+            )
 
         # Construct comparison image.
         context_img = inverse_normalize(batch["context"]["image"][0])
