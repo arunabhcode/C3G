@@ -5,6 +5,8 @@ defaults:
 
 name: scannet_distill
 roots: [datasets/scannet]
+# When set, load {frame_id}_sam.pt from here (e.g. Modal ``precompute_sam_features/scannet``).
+sam_features_root: null
 # Empty list: discover all scenes on disk and split by scan number (see scannet_2dseg_splits).
 scenes: []
 val_scene_count: 8

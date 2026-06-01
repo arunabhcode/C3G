@@ -5,6 +5,8 @@ defaults:
 
 name: replica_distill
 roots: [datasets/replica]
+# When set, load {frame_id}_sam.pt from here (e.g. Modal precompute volume). Else use roots[0].
+sam_features_root: null
 scenes: [office0, office1, office2, office3, office4, room0, room1, room2]
 make_baseline_1: true
 augment: true

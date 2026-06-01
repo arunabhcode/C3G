@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 from collections.abc import Callable
@@ -37,9 +38,14 @@ VANILLA_EVAL_DATASETS: list[tuple[DatasetName, list[str]]] = [
     ("replica", REPLICA_2DSEG_SCENES),
     ("scannet", SCANNET_2DSEG_TEST_SCENES),
 ]
-TrainingConfigName = Literal["feature_head_sam_prompted", "feature_head_sam"]
+TrainingConfigName = Literal[
+    "feature_head_sam_prompted",
+    "feature_head_sam",
+    "feature_head_sam_precomputed",
+]
 TRAINING_CONFIG_PROMPTED: TrainingConfigName = "feature_head_sam_prompted"
 TRAINING_CONFIG_SAM: TrainingConfigName = "feature_head_sam"
+TRAINING_CONFIG_PRECOMPUTED: TrainingConfigName = "feature_head_sam_precomputed"
 
 WEIGHTS_VOLUME = "c3g-weights"
 OUTPUT_VOLUME = "c3g-train-outputs"
@@ -57,7 +63,6 @@ SAM_EVAL_OUTPUT_MOUNT = Path("/sam-eval-outputs")
 VANILLA_SAM_OUTPUT_MOUNT = Path("/vanilla-sam-outputs")
 PRECOMPUTE_SAM_FEATURES_MOUNT = Path("/precompute_sam_features")
 
-SAM_NUM_CHANNELS = 256
 DEFAULT_SAM_CHECKPOINT = WEIGHTS_MOUNT / "sam_vit_h.pth"
 DEFAULT_ENCODER_WEIGHTS = WEIGHTS_MOUNT / "gaussian_decoder.ckpt"
 
@@ -118,6 +123,36 @@ def dataset_group_hydra_overrides(
     return [f"+dataset@_group_.{hydra_add}={hydra_add}"]
 
 
+DISTILL_DATASET_SPECS: dict[DatasetName, dict[str, str | list[str]]] = {
+    "replica": {
+        "hydra_add": "replica_distill",
+        "dataset_cfg_key": "dataset.replica_distill",
+        "roots_key": "dataset.replica_distill.roots",
+        "sam_features_root_key": "dataset.replica_distill.sam_features_root",
+        "overfit_key": "dataset.replica_distill.overfit_to_scene",
+        "default_root": str(REPLICA_MOUNT),
+        "default_sam_features_root": str(PRECOMPUTE_SAM_FEATURES_MOUNT / "replica"),
+        "volume": REPLICA_VOLUME,
+        "precompute_volume": PRECOMPUTE_SAM_FEATURES_VOLUME,
+        "label": "Replica",
+        "scenes": REPLICA_2DSEG_SCENES,
+    },
+    "scannet": {
+        "hydra_add": "scannet_distill",
+        "dataset_cfg_key": "dataset.scannet_distill",
+        "roots_key": "dataset.scannet_distill.roots",
+        "sam_features_root_key": "dataset.scannet_distill.sam_features_root",
+        "overfit_key": "dataset.scannet_distill.overfit_to_scene",
+        "default_root": str(SCANNET_MOUNT),
+        "default_sam_features_root": str(PRECOMPUTE_SAM_FEATURES_MOUNT / "scannet"),
+        "volume": SCANNET_VOLUME,
+        "precompute_volume": PRECOMPUTE_SAM_FEATURES_VOLUME,
+        "label": "ScanNet",
+        "scenes": SCANNET_2DSEG_SCENES,
+    },
+}
+
+
 DATASET_SPECS: dict[DatasetName, dict[str, str | list[str]]] = {
     "replica": {
         "hydra_add": "replica_2dseg",
@@ -145,6 +180,34 @@ DATASET_SPECS: dict[DatasetName, dict[str, str | list[str]]] = {
 
 def resolve_dataset_root(dataset: DatasetName, dataset_root: str | None) -> str:
     return dataset_root or DATASET_SPECS[dataset]["default_root"]
+
+
+def resolve_sam_features_root(
+    dataset: DatasetName, sam_features_root: str | None
+) -> str:
+    """Default SAM feature tree: ``precompute_sam_features/<dataset>/`` on Modal."""
+    if sam_features_root is not None:
+        return sam_features_root
+    return str(DISTILL_DATASET_SPECS[dataset]["default_sam_features_root"])
+
+
+def validate_sam_features_root(dataset: DatasetName, sam_features_root: str) -> None:
+    """Ensure precomputed ``*_sam.pt`` files exist (from ``modal_precompute_sam_features``)."""
+    root = Path(sam_features_root)
+    spec = DISTILL_DATASET_SPECS[dataset]
+    if not root.is_dir():
+        raise FileNotFoundError(
+            f"Precomputed SAM features not found at {root}. "
+            f"Run ``modal_precompute_sam_features`` and write to the "
+            f"``{spec['precompute_volume']}`` volume under ``{dataset}/``."
+        )
+    if not any(root.rglob("*_sam.pt")):
+        raise FileNotFoundError(
+            f"No *_sam.pt files under {root}. "
+            f"Precompute first, e.g. "
+            f"modal run src/modal_infra/modal_precompute_sam_features.py::main "
+            f"--dataset {dataset}"
+        )
 
 
 def resolve_detach(*, detach: bool | None, remote_job: bool) -> bool:
@@ -235,8 +298,15 @@ def run_subprocess_with_output_commit(
         daemon=True,
     )
     thread.start()
+    subprocess_env = {
+        **os.environ,
+        "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
+        "PYTORCH_CUDA_ALLOC_CONF": os.environ.get(
+            "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"
+        ),
+    }
     try:
-        subprocess.run(cmd, check=True, cwd=str(cwd))
+        subprocess.run(cmd, check=True, cwd=str(cwd), env=subprocess_env)
     finally:
         stop_event.set()
         thread.join(timeout=poll_interval_s + 5)
@@ -403,6 +473,81 @@ def build_sam_train_overrides(
     return overrides
 
 
+def build_precomputed_train_overrides(
+    *,
+    run_name: str,
+    dataset: DatasetName,
+    dataset_root: str,
+    sam_features_root: str,
+    max_steps: int,
+    wandb_mode: str,
+    gaussian_weights: str | Path | None = None,
+    val_interval: int | None = None,
+    batch_size: int | None = None,
+    feature_cosine_loss_weight: float | None = None,
+    feature_mag_loss_weight: float | None = None,
+    max_distance_between_context_views: int | None = None,
+    min_distance_between_context_views: int | None = None,
+    view_sampler_warm_up_steps: int | None = None,
+    resume: str | None = None,
+    debug_decoder: bool = False,
+    output_mount: Path = OUTPUT_MOUNT,
+    smoke_scene: str | None = None,
+) -> list[str]:
+    """Hydra overrides for Step 2 in ``docs/distillation_training.md``.
+
+  Assumes Step 1 (``*_sam.pt`` on the ``precompute_sam_features`` volume) is already
+  done. Only adds Modal volume paths, run output dir, and optional CLI knobs.
+    """
+    encoder_weights = resolve_encoder_pretrained_weights(gaussian_weights)
+    spec = DISTILL_DATASET_SPECS[dataset]
+    run_dir = output_mount / "runs" / run_name
+    overrides = [
+        f"+training={TRAINING_CONFIG_PRECOMPUTED}",
+        *dataset_group_hydra_overrides(
+            spec["hydra_add"], TRAINING_CONFIG_PRECOMPUTED
+        ),
+        f"wandb.mode={wandb_mode}",
+        f"wandb.project={run_name}",
+        f"wandb.name={run_name}",
+        f"hydra.run.dir={run_dir}",
+        f"trainer.max_steps={max_steps}",
+        f"model.encoder.pretrained_weights={encoder_weights}",
+        f"{spec['roots_key']}=[{dataset_root}]",
+        f"{spec['sam_features_root_key']}={sam_features_root}",
+        f"debug_decoder.enabled={'true' if debug_decoder else 'false'}",
+    ]
+    if debug_decoder:
+        overrides.append(f"debug_decoder.sam_checkpoint={DEFAULT_SAM_CHECKPOINT}")
+    if val_interval is not None:
+        overrides.append(f"trainer.val_check_interval={val_interval}")
+    if batch_size is not None:
+        overrides.append(f"data_loader.train.batch_size={batch_size}")
+    if feature_cosine_loss_weight is not None:
+        overrides.append(
+            f"train.feature_cosine_loss_weight={feature_cosine_loss_weight}"
+        )
+    if feature_mag_loss_weight is not None:
+        overrides.append(f"train.feature_mag_loss_weight={feature_mag_loss_weight}")
+    if max_distance_between_context_views is not None:
+        overrides.append(
+            f"{spec['dataset_cfg_key']}.view_sampler.max_distance_between_context_views={max_distance_between_context_views}"
+        )
+    if min_distance_between_context_views is not None:
+        overrides.append(
+            f"{spec['dataset_cfg_key']}.view_sampler.min_distance_between_context_views={min_distance_between_context_views}"
+        )
+    if view_sampler_warm_up_steps is not None:
+        overrides.append(
+            f"{spec['dataset_cfg_key']}.view_sampler.warm_up_steps={view_sampler_warm_up_steps}"
+        )
+    if smoke_scene is not None:
+        overrides.append(f"{spec['overfit_key']}={smoke_scene}")
+    if resume:
+        overrides.append(f"checkpointing.load={resume}")
+    return overrides
+
+
 def build_prompted_train_overrides(
     *,
     run_name: str,
@@ -486,12 +631,27 @@ def build_prompted_test_overrides(
     return overrides
 
 
-CONFIG_H = (
-    "submodules/diff_gaussian_rasterization_w_feature_detach/cuda_rasterizer/config.h"
-)
 C3G_MODAL_WORKSPACE = Path("/workspace")
 C3G_MODAL_PYTHON = "3.12"
 VANILLA_SAM_MODAL_ROOT = Path("/root")
+DISTILLATION_TRAINING_DOC = "docs/distillation_training.md"
+
+
+def distill_training_env_run_commands(*, python_version: str = C3G_MODAL_PYTHON) -> list[str]:
+    """Container setup for distillation training (see ``DISTILLATION_TRAINING_DOC``).
+
+    Matches local ``uv sync --frozen``. Extensions JIT-compile on first import of
+    ``cuda_splatting``; the warmup import bakes that into the image so training does
+    not pay compile time on startup. SAM precompute (doc Step 1) is separate.
+    """
+    return [
+        f"uv sync --frozen --python {python_version}",
+    ]
+
+
+def build_distill_train_cmd(overrides: list[str]) -> list[str]:
+    """Run ``src.main`` for precomputed-feature distillation (doc Step 2)."""
+    return ["uv", "run", "--no-sync", "python", "-m", "src.main", *overrides]
 
 
 def repo_root_for_modal(start: Path | None = None) -> Path:
@@ -554,7 +714,11 @@ def build_c3g_modal_image(
     repo_root: Path | None = None,
     workspace: Path = C3G_MODAL_WORKSPACE,
 ):
-    """CUDA + uv image for full C3G Hydra runs on Modal (training or test)."""
+    """CUDA + uv image for C3G distillation / eval on Modal.
+
+    Image build follows ``DISTILLATION_TRAINING_DOC`` environment setup only.
+    Training assumes ``*_sam.pt`` files already exist on the precompute volume.
+    """
     import modal
 
     root = repo_root or repo_root_for_modal()
@@ -598,12 +762,6 @@ def build_c3g_modal_image(
             ],
         )
         .workdir(str(workspace))
-        .run_commands(
-            f"sed -i 's/#define NUM_SEMANTIC_CHANNELS 512/#define NUM_SEMANTIC_CHANNELS {SAM_NUM_CHANNELS}/' {CONFIG_H}",
-            f"uv python install {python_version}",
-            f"uv sync --frozen --python {python_version}",
-            f"uv run --no-sync --python {python_version} python -c \"from submodules.diff_gaussian_rasterization_w_feature_detach.setup import _C\"",
-            f"uv run --no-sync --python {python_version} python -c \"from submodules.diff_gaussian_rasterization_w_pose.setup import _C\"",
-        )
+        .run_commands(*distill_training_env_run_commands(python_version=python_version))
         .env({"PYTHONPATH": str(workspace)})
     )

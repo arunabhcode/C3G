@@ -5,7 +5,7 @@ defaults:
 
 wandb:
   project: noposplat
-  entity: 3d_gpt
+  entity: vrshy-stanford
   name: noposplat_test
   mode: disabled
 
@@ -68,6 +68,10 @@ trainer:
   gradient_clip_val: 0.5
   num_nodes: 1
   log_every_n_steps: 10
+  # null = Lightning "auto" (see src/main.py). Modal sets devices=1 explicitly.
+  devices: null
+  # null = Lightning default (2 sanity val batches). Modal sets 0 to skip.
+  num_sanity_val_steps: null
 
 hydra:
   run:

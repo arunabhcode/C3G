@@ -116,6 +116,11 @@ class DistillationModelWrapper(LightningModule):
         patch_size = self.encoder.patch_size
         patch_h = h // patch_size
         patch_w = w // patch_size
+        if patch_h <= 0 or patch_w <= 0:
+            raise ValueError(
+                f"Cannot downsample SAM features: image ({h}, {w}) is smaller than "
+                f"patch_size={patch_size}"
+            )
         if fh == patch_h and fw == patch_w:
             return sam_features
         flat = rearrange(sam_features, "b v c h w -> (b v) c h w")
@@ -124,6 +129,31 @@ class DistillationModelWrapper(LightningModule):
         )
         return rearrange(flat, "(b v) c h w -> b v c h w", b=b, v=v)
 
+    def _validate_distill_batch_shapes(
+        self, batch: BatchedExample, h: int, w: int
+    ) -> None:
+        """Catch layout bugs early (bad collate / wrong tensor dims → CUDA OOM)."""
+        if h <= 0 or w <= 0 or h > 4096 or w > 4096:
+            raise ValueError(f"Suspicious target image size ({h}, {w})")
+        for stage in ("context", "target"):
+            img = batch[stage]["image"]
+            if img.shape[-2:] != (h, w):
+                raise ValueError(
+                    f"{stage} image spatial {tuple(img.shape[-2:])} != target ({h}, {w}); "
+                    f"full shape {tuple(img.shape)}"
+                )
+            sam = batch[stage]["sam_features"]
+            if sam.ndim != 5:
+                raise ValueError(
+                    f"{stage} sam_features must be 5D (B,V,C,H,W), got {tuple(sam.shape)}"
+                )
+
+    def _should_log_debug_visualizations(self) -> bool:
+        trainer = getattr(self, "trainer", None)
+        if trainer is not None and getattr(trainer, "sanity_checking", False):
+            return False
+        return True
+
     def _get_valid_region(self, sam_features):
         """Return valid (non-padding) region size in the 64x64 SAM embedding space."""
         return sam_features.shape[-2], sam_features.shape[-1]
@@ -131,6 +161,7 @@ class DistillationModelWrapper(LightningModule):
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
         _, _, _, h, w = batch["target"]["image"].shape
+        self._validate_distill_batch_shapes(batch, h, w)
 
         context_sam = batch["context"]["sam_features"]
         target_sam = batch["target"]["sam_features"]
@@ -272,7 +303,7 @@ class DistillationModelWrapper(LightningModule):
             and self.global_step % checkpoint_interval == 0
             and self._last_train_debug_step_logged != self.global_step
         )
-        if should_log_train_debug:
+        if should_log_train_debug and self._should_log_debug_visualizations():
             self._last_train_debug_step_logged = self.global_step
             log_debug_visualizations(
                 self.logger,
@@ -322,6 +353,7 @@ class DistillationModelWrapper(LightningModule):
     def validation_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
         _, _, _, h, w = batch["target"]["image"].shape
+        self._validate_distill_batch_shapes(batch, h, w)
 
         context_sam = batch["context"]["sam_features"]
         target_sam = batch["target"]["sam_features"]
@@ -373,7 +405,7 @@ class DistillationModelWrapper(LightningModule):
         self.log("val/feature_mag", val_mag, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         self.log("val/feature_cosine", val_cosine, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
-        if self.global_rank == 0:
+        if self.global_rank == 0 and self._should_log_debug_visualizations():
             log_debug_visualizations(
                 self.logger,
                 self.global_step,

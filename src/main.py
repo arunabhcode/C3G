@@ -1,10 +1,8 @@
-import os
 from pathlib import Path
 
 import hydra
 import torch
 import wandb
-import signal
 from colorama import Fore
 from jaxtyping import install_import_hook
 from lightning.pytorch import Trainer
@@ -13,10 +11,8 @@ from lightning.pytorch.loggers.wandb import WandbLogger
 from lightning.pytorch.strategies import DDPStrategy
 from omegaconf import DictConfig, OmegaConf
 
-from src.misc.pipeline_debug import log_startup
 from src.misc.weight_modify import checkpoint_filter_fn
 from src.model.encoder.common.gmae import remap_instill_to_qkv_checkpoint
-from src.model.distiller import get_distiller
 
 # Configure beartype and jaxtyping.
 with install_import_hook(
@@ -105,19 +101,32 @@ def train(cfg_dict: DictConfig):
     # This allows the current step to be shared with the data loader processes.
     step_tracker = StepTracker()
 
+    if cfg.trainer.devices is not None:
+        trainer_devices = cfg.trainer.devices
+    else:
+        trainer_devices = "auto"
+
+    use_ddp = (
+        trainer_devices == "auto"
+        and torch.cuda.device_count() > 1
+    ) or (
+        isinstance(trainer_devices, int)
+        and trainer_devices > 1
+    )
+
     trainer_kwargs: dict = dict(
         max_epochs=-1,
         num_nodes=cfg.trainer.num_nodes,
         accelerator="gpu",
         logger=logger,
-        devices="auto",
+        devices=trainer_devices,
         strategy=(
             DDPStrategy(
                 find_unused_parameters=False,
                 broadcast_buffers=False,
                 gradient_as_bucket_view=True,
             )
-            if torch.cuda.device_count() > 1
+            if use_ddp
             else "auto"
         ),
         callbacks=callbacks,
@@ -135,6 +144,8 @@ def train(cfg_dict: DictConfig):
     )
     if cfg.trainer.limit_test_batches is not None:
         trainer_kwargs["limit_test_batches"] = cfg.trainer.limit_test_batches
+    if cfg.trainer.num_sanity_val_steps is not None:
+        trainer_kwargs["num_sanity_val_steps"] = cfg.trainer.num_sanity_val_steps
     trainer = Trainer(**trainer_kwargs)
     torch.manual_seed(cfg_dict.seed + trainer.global_rank)
 

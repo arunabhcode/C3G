@@ -1,19 +1,14 @@
 # @package _global_
 
 defaults:
-  - /dataset@_group_.scannet_distill: scannet_distill
+  # Dataset is selected at launch, e.g. +dataset@_group_.scannet_distill=scannet_distill
   - override /model/encoder: noposplat
   - override /model/encoder/backbone: croco
   - override /loss: [mse]
 
-# loss: {}  # uncomment and remove mse override to disable RGB loss sanity check
-
 wandb:
-  mode: online
-  entity: vrshy-stanford
-  project: distillation-training
-  name: sam_distill_scannet_scene
-  tags: [scannet, 224x224, sam, precomputed, distillation]
+  name: sam_distill
+  tags: [sam, precomputed, distillation]
 
 model:
   encoder:
@@ -28,7 +23,7 @@ model:
     pose_free: true
     intrinsics_embed_loc: None
     intrinsics_embed_type: None
-    pretrained_weights: "/home/tiny/C3G/pretrained_weights/gaussian_decoder.ckpt"
+    pretrained_weights: "./pretrained_weights/model.pt"
     init_points: one_point
     gaussian_feature_dim: 256
     different_learnable_tokens: false
@@ -41,14 +36,14 @@ model:
     feature_detach: true
 
 optimizer:
-  lr: 1e-5
-  warm_up_steps: 100
+  lr: 1.5e-5
+  warm_up_steps: 1000
   weight_decay: 0.05
   feature_head_weight_decay: 0.01
 
 data_loader:
   train:
-    batch_size: 4
+    batch_size: 1
 
 train:
   pipeline: distillation
@@ -57,15 +52,15 @@ train:
   context_view_loss: true
 
 trainer:
-  max_steps: 1001
+  max_steps: 5001
   val_check_interval: 500
   accumulate_grad_batches: 2
 
 debug_decoder:
-  enabled: true
-  sam_checkpoint: "/home/tiny/C3G/pretrained_weights/sam_vit_h.pth"
+  enabled: false
+  sam_checkpoint: "./pretrained_weights/sam_vit_h.pth"
   sam_model_variant: sam_vit_h
 
 checkpointing:
-  every_n_train_steps: 50
-  save_top_k: 20
+  every_n_train_steps: 500
+  save_top_k: 2

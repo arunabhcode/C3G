@@ -57,6 +57,7 @@ class ReplicaDistillCfg(DatasetCfgCommon):
     relative_pose: bool
     skip_bad_shape: bool
     num_of_inputs: int = 2
+    sam_features_root: Path | None = None
 
 
 @dataclass
@@ -105,7 +106,12 @@ class DatasetReplicaDistill(IterableDataset):
 
     def _sam_feature_path(self, scene: str, frame_id: str) -> Path:
         """Return the path to the pre-computed SAM feature file for a frame."""
-        return self.root / scene / f"{frame_id}_sam.pt"
+        feature_root = (
+            Path(self.cfg.sam_features_root)
+            if self.cfg.sam_features_root is not None
+            else self.root
+        )
+        return feature_root / scene / f"{frame_id}_sam.pt"
 
     def get_num_frames(self, scene: str) -> int:
         """Get number of frames available for a scene."""

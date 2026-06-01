@@ -38,6 +38,10 @@ class TrainerCfg:
     limit_test_batches: int | float | None = None
     # How often Lightning flushes self.log metrics to W&B (optimizer steps).
     log_every_n_steps: int = 10
+    # Lightning ``devices`` (e.g. 1 or "auto"). None keeps legacy "auto" + DDP behavior.
+    devices: int | str | None = None
+    # Set to 0 to skip sanity validation (useful on multi-GPU hosts).
+    num_sanity_val_steps: int | None = None
 
 
 def val_check_interval_in_training_batches(
