@@ -1,14 +1,28 @@
 # @package _global_
+# Modal SAM distillation (ScanNet, precomputed features). Run via:
+#   modal run src/modal_infra/modal_train_c3g_sam.py
 
 defaults:
-  # Dataset is selected at launch, e.g. +dataset@_group_.scannet_distill=scannet_distill
+  - /dataset@_group_.scannet_distill: scannet_distill
   - override /model/encoder: noposplat
   - override /model/encoder/backbone: croco
   - override /loss: [mse]
 
 wandb:
-  name: sam_distill
-  tags: [sam, precomputed, distillation]
+  mode: online
+  entity: vrshy-stanford
+  project: distillation-training
+  name: sam_distill_scannet
+  tags: [scannet, 224x224, sam, precomputed, distillation, modal]
+
+hydra:
+  run:
+    dir: /outputs/runs/${wandb.name}
+
+dataset:
+  scannet_distill:
+    roots: [/scannet]
+    sam_features_root: /precompute_sam_features/scannet
 
 model:
   encoder:
@@ -23,7 +37,7 @@ model:
     pose_free: true
     intrinsics_embed_loc: None
     intrinsics_embed_type: None
-    pretrained_weights: "./pretrained_weights/model.pt"
+    pretrained_weights: /weights/gaussian_decoder.ckpt
     init_points: one_point
     gaussian_feature_dim: 256
     different_learnable_tokens: false
@@ -37,13 +51,13 @@ model:
 
 optimizer:
   lr: 1.5e-5
-  warm_up_steps: 1000
+  warm_up_steps: 100
   weight_decay: 0.05
   feature_head_weight_decay: 0.01
 
 data_loader:
   train:
-    batch_size: 1
+    batch_size: 4
 
 train:
   pipeline: distillation
@@ -55,12 +69,14 @@ trainer:
   max_steps: 5001
   val_check_interval: 500
   accumulate_grad_batches: 2
+  devices: 1
+  num_sanity_val_steps: 0
 
 debug_decoder:
-  enabled: false
-  sam_checkpoint: "./pretrained_weights/sam_vit_h.pth"
+  enabled: true
+  sam_checkpoint: /weights/sam_vit_h.pth
   sam_model_variant: sam_vit_h
 
 checkpointing:
-  every_n_train_steps: 500
-  save_top_k: 2
+  every_n_train_steps: 50
+  save_top_k: 20

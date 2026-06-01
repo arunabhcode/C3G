@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import threading
 from collections.abc import Callable
@@ -123,36 +122,6 @@ def dataset_group_hydra_overrides(
     return [f"+dataset@_group_.{hydra_add}={hydra_add}"]
 
 
-DISTILL_DATASET_SPECS: dict[DatasetName, dict[str, str | list[str]]] = {
-    "replica": {
-        "hydra_add": "replica_distill",
-        "dataset_cfg_key": "dataset.replica_distill",
-        "roots_key": "dataset.replica_distill.roots",
-        "sam_features_root_key": "dataset.replica_distill.sam_features_root",
-        "overfit_key": "dataset.replica_distill.overfit_to_scene",
-        "default_root": str(REPLICA_MOUNT),
-        "default_sam_features_root": str(PRECOMPUTE_SAM_FEATURES_MOUNT / "replica"),
-        "volume": REPLICA_VOLUME,
-        "precompute_volume": PRECOMPUTE_SAM_FEATURES_VOLUME,
-        "label": "Replica",
-        "scenes": REPLICA_2DSEG_SCENES,
-    },
-    "scannet": {
-        "hydra_add": "scannet_distill",
-        "dataset_cfg_key": "dataset.scannet_distill",
-        "roots_key": "dataset.scannet_distill.roots",
-        "sam_features_root_key": "dataset.scannet_distill.sam_features_root",
-        "overfit_key": "dataset.scannet_distill.overfit_to_scene",
-        "default_root": str(SCANNET_MOUNT),
-        "default_sam_features_root": str(PRECOMPUTE_SAM_FEATURES_MOUNT / "scannet"),
-        "volume": SCANNET_VOLUME,
-        "precompute_volume": PRECOMPUTE_SAM_FEATURES_VOLUME,
-        "label": "ScanNet",
-        "scenes": SCANNET_2DSEG_SCENES,
-    },
-}
-
-
 DATASET_SPECS: dict[DatasetName, dict[str, str | list[str]]] = {
     "replica": {
         "hydra_add": "replica_2dseg",
@@ -180,34 +149,6 @@ DATASET_SPECS: dict[DatasetName, dict[str, str | list[str]]] = {
 
 def resolve_dataset_root(dataset: DatasetName, dataset_root: str | None) -> str:
     return dataset_root or DATASET_SPECS[dataset]["default_root"]
-
-
-def resolve_sam_features_root(
-    dataset: DatasetName, sam_features_root: str | None
-) -> str:
-    """Default SAM feature tree: ``precompute_sam_features/<dataset>/`` on Modal."""
-    if sam_features_root is not None:
-        return sam_features_root
-    return str(DISTILL_DATASET_SPECS[dataset]["default_sam_features_root"])
-
-
-def validate_sam_features_root(dataset: DatasetName, sam_features_root: str) -> None:
-    """Ensure precomputed ``*_sam.pt`` files exist (from ``modal_precompute_sam_features``)."""
-    root = Path(sam_features_root)
-    spec = DISTILL_DATASET_SPECS[dataset]
-    if not root.is_dir():
-        raise FileNotFoundError(
-            f"Precomputed SAM features not found at {root}. "
-            f"Run ``modal_precompute_sam_features`` and write to the "
-            f"``{spec['precompute_volume']}`` volume under ``{dataset}/``."
-        )
-    if not any(root.rglob("*_sam.pt")):
-        raise FileNotFoundError(
-            f"No *_sam.pt files under {root}. "
-            f"Precompute first, e.g. "
-            f"modal run src/modal_infra/modal_precompute_sam_features.py::main "
-            f"--dataset {dataset}"
-        )
 
 
 def resolve_detach(*, detach: bool | None, remote_job: bool) -> bool:
@@ -254,64 +195,6 @@ def run_subprocess_with_precompute_commit(
         thread.join(timeout=poll_interval_s + 5)
         commit()
         print(f"Committed precompute volume (final): {output_root}")
-
-
-def run_subprocess_with_output_commit(
-    *,
-    cmd: list[str],
-    cwd: Path | str,
-    run_dir: Path,
-    commit: Callable[[], None],
-    poll_interval_s: float = 15.0,
-) -> None:
-    """Run a training subprocess and persist ``run_dir`` to a Modal output volume.
-
-    Commits when the Hydra run directory first appears and whenever a new
-    ``*.ckpt`` file shows up under ``run_dir/checkpoints/``. A final commit
-    always runs after the subprocess exits (success or failure).
-    """
-    stop_event = threading.Event()
-    checkpoints_dir = run_dir / "checkpoints"
-    seen_checkpoints: set[str] = set()
-    run_dir_committed = False
-
-    def _commit_loop() -> None:
-        nonlocal run_dir_committed
-        while not stop_event.is_set():
-            if run_dir.is_dir() and not run_dir_committed:
-                commit()
-                run_dir_committed = True
-                print(f"Committed output volume (run dir): {run_dir}")
-
-            if checkpoints_dir.is_dir():
-                for ckpt in checkpoints_dir.glob("*.ckpt"):
-                    if ckpt.name not in seen_checkpoints:
-                        seen_checkpoints.add(ckpt.name)
-                        commit()
-                        print(f"Committed output volume (checkpoint): {ckpt.name}")
-
-            stop_event.wait(poll_interval_s)
-
-    thread = threading.Thread(
-        target=_commit_loop,
-        name="modal-output-commit",
-        daemon=True,
-    )
-    thread.start()
-    subprocess_env = {
-        **os.environ,
-        "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
-        "PYTORCH_CUDA_ALLOC_CONF": os.environ.get(
-            "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"
-        ),
-    }
-    try:
-        subprocess.run(cmd, check=True, cwd=str(cwd), env=subprocess_env)
-    finally:
-        stop_event.set()
-        thread.join(timeout=poll_interval_s + 5)
-        commit()
-        print(f"Committed output volume (final): {run_dir}")
 
 
 def find_smoke_scene(
@@ -473,81 +356,6 @@ def build_sam_train_overrides(
     return overrides
 
 
-def build_precomputed_train_overrides(
-    *,
-    run_name: str,
-    dataset: DatasetName,
-    dataset_root: str,
-    sam_features_root: str,
-    max_steps: int,
-    wandb_mode: str,
-    gaussian_weights: str | Path | None = None,
-    val_interval: int | None = None,
-    batch_size: int | None = None,
-    feature_cosine_loss_weight: float | None = None,
-    feature_mag_loss_weight: float | None = None,
-    max_distance_between_context_views: int | None = None,
-    min_distance_between_context_views: int | None = None,
-    view_sampler_warm_up_steps: int | None = None,
-    resume: str | None = None,
-    debug_decoder: bool = False,
-    output_mount: Path = OUTPUT_MOUNT,
-    smoke_scene: str | None = None,
-) -> list[str]:
-    """Hydra overrides for Step 2 in ``docs/distillation_training.md``.
-
-  Assumes Step 1 (``*_sam.pt`` on the ``precompute_sam_features`` volume) is already
-  done. Only adds Modal volume paths, run output dir, and optional CLI knobs.
-    """
-    encoder_weights = resolve_encoder_pretrained_weights(gaussian_weights)
-    spec = DISTILL_DATASET_SPECS[dataset]
-    run_dir = output_mount / "runs" / run_name
-    overrides = [
-        f"+training={TRAINING_CONFIG_PRECOMPUTED}",
-        *dataset_group_hydra_overrides(
-            spec["hydra_add"], TRAINING_CONFIG_PRECOMPUTED
-        ),
-        f"wandb.mode={wandb_mode}",
-        f"wandb.project={run_name}",
-        f"wandb.name={run_name}",
-        f"hydra.run.dir={run_dir}",
-        f"trainer.max_steps={max_steps}",
-        f"model.encoder.pretrained_weights={encoder_weights}",
-        f"{spec['roots_key']}=[{dataset_root}]",
-        f"{spec['sam_features_root_key']}={sam_features_root}",
-        f"debug_decoder.enabled={'true' if debug_decoder else 'false'}",
-    ]
-    if debug_decoder:
-        overrides.append(f"debug_decoder.sam_checkpoint={DEFAULT_SAM_CHECKPOINT}")
-    if val_interval is not None:
-        overrides.append(f"trainer.val_check_interval={val_interval}")
-    if batch_size is not None:
-        overrides.append(f"data_loader.train.batch_size={batch_size}")
-    if feature_cosine_loss_weight is not None:
-        overrides.append(
-            f"train.feature_cosine_loss_weight={feature_cosine_loss_weight}"
-        )
-    if feature_mag_loss_weight is not None:
-        overrides.append(f"train.feature_mag_loss_weight={feature_mag_loss_weight}")
-    if max_distance_between_context_views is not None:
-        overrides.append(
-            f"{spec['dataset_cfg_key']}.view_sampler.max_distance_between_context_views={max_distance_between_context_views}"
-        )
-    if min_distance_between_context_views is not None:
-        overrides.append(
-            f"{spec['dataset_cfg_key']}.view_sampler.min_distance_between_context_views={min_distance_between_context_views}"
-        )
-    if view_sampler_warm_up_steps is not None:
-        overrides.append(
-            f"{spec['dataset_cfg_key']}.view_sampler.warm_up_steps={view_sampler_warm_up_steps}"
-        )
-    if smoke_scene is not None:
-        overrides.append(f"{spec['overfit_key']}={smoke_scene}")
-    if resume:
-        overrides.append(f"checkpointing.load={resume}")
-    return overrides
-
-
 def build_prompted_train_overrides(
     *,
     run_name: str,
@@ -634,24 +442,39 @@ def build_prompted_test_overrides(
 C3G_MODAL_WORKSPACE = Path("/workspace")
 C3G_MODAL_PYTHON = "3.12"
 VANILLA_SAM_MODAL_ROOT = Path("/root")
-DISTILLATION_TRAINING_DOC = "docs/distillation_training.md"
+VANILLA_SAM_PYTHON = "3.11"
+PYTORCH_CU124_INDEX = "https://download.pytorch.org/whl/cu124"
+MODAL_UV_PATH = "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
-def distill_training_env_run_commands(*, python_version: str = C3G_MODAL_PYTHON) -> list[str]:
-    """Container setup for distillation training (see ``DISTILLATION_TRAINING_DOC``).
-
-    Matches local ``uv sync --frozen``. Extensions JIT-compile on first import of
-    ``cuda_splatting``; the warmup import bakes that into the image so training does
-    not pay compile time on startup. SAM precompute (doc Step 1) is separate.
-    """
+def modal_install_commands(
+    *, workspace: Path = C3G_MODAL_WORKSPACE, python_version: str = C3G_MODAL_PYTHON
+) -> list[str]:
+    """Install the repo into the Modal image with ``uv pip install``."""
     return [
-        f"uv sync --frozen --python {python_version}",
+        f"uv pip install --python {python_version} -e {workspace}",
     ]
 
 
-def build_distill_train_cmd(overrides: list[str]) -> list[str]:
-    """Run ``src.main`` for precomputed-feature distillation (doc Step 2)."""
-    return ["uv", "run", "--no-sync", "python", "-m", "src.main", *overrides]
+def vanilla_sam_install_commands(
+    *, python_version: str = VANILLA_SAM_PYTHON
+) -> list[str]:
+    """Install vanilla SAM inference deps with ``uv pip install``."""
+    py = python_version
+    return [
+        (
+            f"uv pip install --python {py} "
+            "numpy==1.26.4 pillow==11.0.0 fastapi==0.118.0 pydantic==2.11.4"
+        ),
+        (
+            f"uv pip install --python {py} torch==2.5.1 torchvision==0.20.1 "
+            f"--index-url {PYTORCH_CU124_INDEX}"
+        ),
+        (
+            f'uv pip install --python {py} '
+            f'"segment-anything @ git+https://github.com/facebookresearch/segment-anything.git"'
+        ),
+    ]
 
 
 def repo_root_for_modal(start: Path | None = None) -> Path:
@@ -673,33 +496,18 @@ def build_vanilla_sam_modal_image(
     src_root: Path | None = None,
     remote_root: Path = VANILLA_SAM_MODAL_ROOT,
 ):
-    """Lightweight CUDA image for vanilla SAM inference on Modal.
-
-    Installs ``git`` before any pip git dependencies (same ordering as
-    :func:`build_c3g_modal_image`, which uses ``uv sync`` for segment-anything).
-    """
+    """Lightweight image for vanilla SAM inference on Modal (``uv pip install``)."""
     import modal
 
     # Resolve from this file so local dev and vanilla Modal workers (/root/src) both work
     # without a full repo checkout (workers mount only src/, not pyproject.toml).
     src = src_root or Path(__file__).resolve().parent.parent
     return (
-        modal.Image.debian_slim(python_version="3.11")
-        .apt_install("git", "ca-certificates")
-        .pip_install(
-            "numpy==1.26.4",
-            "pillow==11.0.0",
-            "fastapi==0.118.0",
-            "pydantic==2.11.4",
-        )
-        .pip_install(
-            "torch==2.5.1",
-            "torchvision==0.20.1",
-            index_url="https://download.pytorch.org/whl/cu124",
-        )
-        .pip_install(
-            "segment-anything @ git+https://github.com/facebookresearch/segment-anything.git",
-        )
+        modal.Image.debian_slim(python_version=VANILLA_SAM_PYTHON)
+        .apt_install("git", "ca-certificates", "curl")
+        .run_commands("curl -LsSf https://astral.sh/uv/install.sh | sh")
+        .env({"PATH": MODAL_UV_PATH})
+        .run_commands(*vanilla_sam_install_commands())
         .env({"PYTHONPATH": str(remote_root)})
         .add_local_dir(
             str(src),
@@ -714,11 +522,7 @@ def build_c3g_modal_image(
     repo_root: Path | None = None,
     workspace: Path = C3G_MODAL_WORKSPACE,
 ):
-    """CUDA + uv image for C3G distillation / eval on Modal.
-
-    Image build follows ``DISTILLATION_TRAINING_DOC`` environment setup only.
-    Training assumes ``*_sam.pt`` files already exist on the precompute volume.
-    """
+    """CUDA image for C3G on Modal: copy repo to ``/workspace`` and ``uv pip install -e``."""
     import modal
 
     root = repo_root or repo_root_for_modal()
@@ -742,7 +546,7 @@ def build_c3g_modal_image(
         )
         .env(
             {
-                "PATH": "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "PATH": MODAL_UV_PATH,
                 "TORCH_CUDA_ARCH_LIST": "8.0;8.6",
                 "FORCE_CUDA": "1",
             }
@@ -762,6 +566,6 @@ def build_c3g_modal_image(
             ],
         )
         .workdir(str(workspace))
-        .run_commands(*distill_training_env_run_commands(python_version=python_version))
+        .run_commands(*modal_install_commands(workspace=workspace, python_version=python_version))
         .env({"PYTHONPATH": str(workspace)})
     )
