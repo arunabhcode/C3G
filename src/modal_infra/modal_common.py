@@ -217,8 +217,12 @@ C3G_MODAL_PYTHON = "3.12"
 VANILLA_SAM_MODAL_ROOT = Path("/root")
 VANILLA_SAM_PYTHON = "3.11"
 PYTORCH_CU124_INDEX = "https://download.pytorch.org/whl/cu124"
+PYTORCH_CU128_INDEX = "https://download.pytorch.org/whl/cu128"
 MODAL_UV_PATH = "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+# Match distillation_sanity_check.sh / pyproject.toml (torch cu128, Blackwell sm_120).
+C3G_CUDA_IMAGE = "nvidia/cuda:12.8.0-devel-ubuntu24.04"
+C3G_TORCH_CUDA_ARCH_LIST = "10.0"
 
 def build_eval_sam_modal_image(
     *,
@@ -257,6 +261,8 @@ def build_c3g_modal_image(
     *,
     repo_root: Path | None = None,
     workspace: Path = C3G_MODAL_WORKSPACE,
+    cuda_image: str = C3G_CUDA_IMAGE,
+    torch_cuda_arch_list: str = C3G_TORCH_CUDA_ARCH_LIST,
 ):
     """CUDA image for C3G on Modal: copy repo to ``/workspace`` and ``uv pip install -e``."""
     import modal
@@ -275,9 +281,7 @@ def build_c3g_modal_image(
 
     python_version = C3G_MODAL_PYTHON
     return (
-        modal.Image.from_registry(
-            "nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python=python_version
-        )
+        modal.Image.from_registry(cuda_image, add_python=python_version)
         .apt_install(
             "git",
             "curl",
@@ -294,8 +298,9 @@ def build_c3g_modal_image(
         .env(
             {
                 "PATH": MODAL_UV_PATH,
-                "TORCH_CUDA_ARCH_LIST": "8.0;8.6",
+                "TORCH_CUDA_ARCH_LIST": torch_cuda_arch_list,
                 "FORCE_CUDA": "1",
+                "UV_INDEX_PYTORCH_CU128_URL": PYTORCH_CU128_INDEX,
             }
         )
         .add_local_dir(

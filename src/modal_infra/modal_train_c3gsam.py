@@ -65,7 +65,7 @@ VOLUMES = {
 
 @app.function(
     image=build_c3g_modal_image(),
-    gpu="T4",
+    gpu="B200",
     timeout=60 * 60 * 24,
     secrets=[WANDB_SECRET],
     volumes=VOLUMES,
