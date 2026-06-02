@@ -52,6 +52,7 @@ VANILLA_SAM_OUTPUT_MOUNT = Path("/vanilla-sam-outputs")
 PRECOMPUTE_SAM_FEATURES_MOUNT = Path("/precompute_sam_features")
 
 DEFAULT_SAM_CHECKPOINT = WEIGHTS_MOUNT / "sam_vit_h.pth"
+DEFAULT_DISTILLATION_CHECKPOINT = WEIGHTS_MOUNT / "distillation-base.ckpt"
 
 
 def resolve_sam_checkpoint(override: str | Path | None = None) -> Path:
@@ -64,6 +65,41 @@ def resolve_sam_checkpoint(override: str | Path | None = None) -> Path:
             f"  modal volume put {WEIGHTS_VOLUME} /path/to/sam_vit_h.pth sam_vit_h.pth"
         )
     return path
+
+
+def resolve_distillation_checkpoint(override: str | Path | None = None) -> Path:
+    """Return the distillation Lightning checkpoint from the ``c3g-weights`` volume."""
+    path = (
+        Path(override) if override is not None else DEFAULT_DISTILLATION_CHECKPOINT
+    )
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Distillation checkpoint not found at {path}. "
+            f"Upload with:\n"
+            f"  modal volume put {WEIGHTS_VOLUME} /path/to/distillation-base.ckpt "
+            f"distillation-base.ckpt"
+        )
+    return path
+
+
+def sample_eval_visualization_keys(
+    dataset_root: str | Path,
+    scenes: list[str],
+    *,
+    count: int = 5,
+    seed: int = 42,
+) -> list[str]:
+    """Pick ``count`` random ``scene/frame_id`` keys for test debug visualizations."""
+    import random
+
+    frames = iter_dataset_frames(dataset_root, scenes)
+    if not frames:
+        raise FileNotFoundError(
+            f"No labeled frames under {dataset_root} for scenes {scenes}"
+        )
+    rng = random.Random(seed)
+    picked = rng.sample(frames, min(count, len(frames)))
+    return [f"{scene}/{paths.frame_id}" for scene, paths in picked]
 
 
 DATASET_SPECS: dict[DatasetName, dict[str, str | list[str]]] = {

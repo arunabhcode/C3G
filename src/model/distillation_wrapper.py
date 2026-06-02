@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -11,6 +12,7 @@ from ..dataset.data_module import get_data_shim
 from ..dataset.types import BatchedExample
 from ..global_cfg import get_cfg
 from ..loss import Loss
+from ..misc.frame_layout import format_frame_id
 from ..misc.step_tracker import StepTracker
 from .decoder.decoder import Decoder, DepthRenderingMode
 from .debug_visualizer import log_debug_visualizations, log_decoder_debug
@@ -78,6 +80,7 @@ class DistillationModelWrapper(LightningModule):
         self.data_shim = get_data_shim(self.encoder)
         self.losses = nn.ModuleList(losses)
         self._last_train_debug_step_logged: int | None = None
+        self._logged_test_visualization_keys: set[str] = set()
 
         self.sam_debug_decoder = None
         if debug_decoder_cfg and debug_decoder_cfg.enabled:
@@ -157,6 +160,140 @@ class DistillationModelWrapper(LightningModule):
     def _get_valid_region(self, sam_features):
         """Return valid (non-padding) region size in the 64x64 SAM embedding space."""
         return sam_features.shape[-2], sam_features.shape[-1]
+
+    @staticmethod
+    def _batch_visualization_key(batch: BatchedExample) -> str:
+        scene = batch["scene"]
+        if isinstance(scene, (list, tuple)):
+            scene = scene[0]
+        target_index = int(batch["target"]["index"][0, 0].item())
+        return f"{scene}/{format_frame_id(target_index)}"
+
+    def _configured_visualization_keys(self) -> set[str]:
+        eval_cfg = get_cfg().get("eval", {})
+        keys = eval_cfg.get("visualization_keys")
+        if keys is None:
+            return set()
+        return {str(key) for key in keys}
+
+    def _matching_visualization_key(self, batch: BatchedExample) -> str | None:
+        viz_keys = self._configured_visualization_keys()
+        if not viz_keys:
+            return None
+        scene = batch["scene"]
+        if isinstance(scene, (list, tuple)):
+            scene = scene[0]
+        for target_index in batch["target"]["index"][0].tolist():
+            key = f"{scene}/{format_frame_id(int(target_index))}"
+            if key in viz_keys:
+                return key
+        return None
+
+    def _should_log_test_visualization(self, batch: BatchedExample) -> bool:
+        if not self._should_log_debug_visualizations():
+            return False
+        key = self._matching_visualization_key(batch)
+        if key is None or key in self._logged_test_visualization_keys:
+            return False
+        self._logged_test_visualization_keys.add(key)
+        return True
+
+    def _distill_forward_eval(
+        self, batch: BatchedExample, h: int, w: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, object, int, int]:
+        context_sam = batch["context"]["sam_features"]
+        target_sam = batch["target"]["sam_features"]
+        context_sam_enc = self._downsample_for_encoder(context_sam, h, w)
+
+        gaussians = self.encoder(
+            batch["context"],
+            self.global_step,
+            context_feature=context_sam_enc,
+        )
+
+        gaussians_detached = Gaussians(
+            means=gaussians.means.detach(),
+            covariances=gaussians.covariances.detach(),
+            harmonics=gaussians.harmonics.detach(),
+            opacities=gaussians.opacities.detach(),
+            feature=gaussians.feature,
+        )
+
+        output = self.decoder.forward(
+            gaussians_detached,
+            batch["target"]["extrinsics"],
+            batch["target"]["intrinsics"],
+            batch["target"]["near"],
+            batch["target"]["far"],
+            (h, w),
+        )
+
+        b, v, c, fh, fw = target_sam.shape
+        rendered_interp = F.interpolate(
+            rearrange(output.feature, "b v c h w -> (b v) c h w"),
+            size=(fh, fw),
+            mode="bilinear",
+            align_corners=False,
+        )
+        rendered_interp = rearrange(
+            rendered_interp, "(b v) c h w -> b v c h w", b=b, v=v
+        )
+
+        valid_h, valid_w = self._get_valid_region(target_sam)
+        rendered_crop = rendered_interp[:, :, :, :valid_h, :valid_w]
+        target_crop = target_sam[:, :, :, :valid_h, :valid_w]
+        return (
+            target_sam,
+            rendered_interp,
+            rendered_crop,
+            target_crop,
+            output,
+            valid_h,
+            valid_w,
+        )
+
+    def _log_distill_debug_visualizations(
+        self,
+        batch: BatchedExample,
+        *,
+        target_sam: torch.Tensor,
+        rendered_interp: torch.Tensor,
+        output,
+        h: int,
+        w: int,
+        valid_h: int,
+        valid_w: int,
+        prefix: str,
+        log_interval: int = 1,
+    ) -> None:
+        if self.global_rank != 0:
+            return
+        log_debug_visualizations(
+            self.logger,
+            self.global_step,
+            log_interval,
+            batch["target"]["image"][0, 0],
+            target_sam[0, 0],
+            rendered_interp[0, 0],
+            (h, w),
+            prefix=prefix,
+            valid_region=(valid_h, valid_w),
+            rendered_rgb=output.color[0, 0].detach().float()
+            if output.color is not None
+            else None,
+        )
+        log_decoder_debug(
+            self.logger,
+            self.global_step,
+            log_interval,
+            self.sam_debug_decoder,
+            target_sam[0, 0].detach().float(),
+            rendered_interp[0, 0].detach().float(),
+            batch["target"]["image"][0, 0].detach().float(),
+            (h, w),
+            prefix=prefix,
+            valid_region=(valid_h, valid_w),
+        )
 
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
@@ -353,90 +490,105 @@ class DistillationModelWrapper(LightningModule):
 
         return total_loss
 
+    def _log_distill_metrics(
+        self,
+        rendered_crop: torch.Tensor,
+        target_crop: torch.Tensor,
+        *,
+        prefix: Literal["val", "test"],
+    ) -> None:
+        feature_mag = F.l1_loss(rendered_crop.norm(dim=2), target_crop.norm(dim=2))
+        feature_cosine = compute_feature_losses(rendered_crop, target_crop)
+        self.log(
+            f"{prefix}/feature_mag",
+            feature_mag,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+        )
+        self.log(
+            f"{prefix}/feature_cosine",
+            feature_cosine,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+        )
+
     def validation_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
         _, _, _, h, w = batch["target"]["image"].shape
         self._validate_distill_batch_shapes(batch, h, w)
 
-        context_sam = batch["context"]["sam_features"]
-        target_sam = batch["target"]["sam_features"]
-
-        context_sam_enc = self._downsample_for_encoder(context_sam, h, w)
-
-        gaussians = self.encoder(
-            batch["context"],
-            self.global_step,
-            context_feature=context_sam_enc,
-        )
-
-        gaussians_detached = Gaussians(
-            means=gaussians.means.detach(),
-            covariances=gaussians.covariances.detach(),
-            harmonics=gaussians.harmonics.detach(),
-            opacities=gaussians.opacities.detach(),
-            feature=gaussians.feature,
-        )
-
-        output = self.decoder.forward(
-            gaussians_detached,
-            batch["target"]["extrinsics"],
-            batch["target"]["intrinsics"],
-            batch["target"]["near"],
-            batch["target"]["far"],
-            (h, w),
-        )
-
-        b, v, c, fh, fw = target_sam.shape
-        rendered_interp = F.interpolate(
-            rearrange(output.feature, "b v c h w -> (b v) c h w"),
-            size=(fh, fw),
-            mode="bilinear",
-            align_corners=False,
-        )
-        rendered_interp = rearrange(
-            rendered_interp, "(b v) c h w -> b v c h w", b=b, v=v
-        )
-
-        valid_h, valid_w = self._get_valid_region(target_sam)
-        rendered_crop = rendered_interp[:, :, :, :valid_h, :valid_w]
-        target_crop = target_sam[:, :, :, :valid_h, :valid_w]
-
-        # rendered_normed = F.normalize(rendered_crop, dim=2)
-        # target_normed = F.normalize(target_crop, dim=2)
-        val_mag = F.l1_loss(rendered_crop.norm(dim=2), target_crop.norm(dim=2))
-        val_cosine = compute_feature_losses(rendered_crop, target_crop)
-        self.log("val/feature_mag", val_mag, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        self.log("val/feature_cosine", val_cosine, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        (
+            target_sam,
+            rendered_interp,
+            rendered_crop,
+            target_crop,
+            output,
+            valid_h,
+            valid_w,
+        ) = self._distill_forward_eval(batch, h, w)
+        self._log_distill_metrics(rendered_crop, target_crop, prefix="val")
 
         if self.global_rank == 0 and self._should_log_debug_visualizations():
             ckpt_cfg = get_cfg()["checkpointing"]
             debug_interval = ckpt_cfg.get(
                 "debug_log_interval", ckpt_cfg.get("every_n_train_steps", 50)
             )
-            log_debug_visualizations(
-                self.logger,
-                self.global_step,
-                debug_interval,
-                batch["target"]["image"][0, 0],
-                target_sam[0, 0],
-                rendered_interp[0, 0],
-                (h, w),
-                valid_region=(valid_h, valid_w),
-                rendered_rgb=output.color[0, 0].detach().float()
-                if output.color is not None
-                else None,
-            )
-            log_decoder_debug(
-                self.logger,
-                self.global_step,
-                debug_interval,
-                self.sam_debug_decoder,
-                target_sam[0, 0].detach().float(),
-                rendered_interp[0, 0].detach().float(),
-                batch["target"]["image"][0, 0].detach().float(),
-                (h, w),
+            self._log_distill_debug_visualizations(
+                batch,
+                target_sam=target_sam,
+                rendered_interp=rendered_interp,
+                output=output,
+                h=h,
+                w=w,
+                valid_h=valid_h,
+                valid_w=valid_w,
                 prefix="val",
-                valid_region=(valid_h, valid_w),
+                log_interval=debug_interval,
+            )
+
+    def test_step(self, batch, batch_idx):
+        batch: BatchedExample = self.data_shim(batch)
+        _, _, _, h, w = batch["target"]["image"].shape
+        self._validate_distill_batch_shapes(batch, h, w)
+
+        (
+            target_sam,
+            rendered_interp,
+            rendered_crop,
+            target_crop,
+            output,
+            valid_h,
+            valid_w,
+        ) = self._distill_forward_eval(batch, h, w)
+        self._log_distill_metrics(rendered_crop, target_crop, prefix="test")
+
+        if batch_idx % 50 == 0 and self.global_rank == 0:
+            print(
+                f"test batch {batch_idx}; scene = {batch['scene']}; "
+                f"target = {batch['target']['index'].tolist()}",
+                flush=True,
+            )
+
+        if self._should_log_test_visualization(batch):
+            viz_key = self._matching_visualization_key(batch)
+            print(f"Logging test debug visualizations for {viz_key}", flush=True)
+            self._log_distill_debug_visualizations(
+                batch,
+                target_sam=target_sam,
+                rendered_interp=rendered_interp,
+                output=output,
+                h=h,
+                w=w,
+                valid_h=valid_h,
+                valid_w=valid_w,
+                prefix="test",
+                log_interval=1,
             )
 
     def configure_optimizers(self):

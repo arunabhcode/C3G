@@ -1,0 +1,50 @@
+# @package _global_
+# Modal C3G SAM distillation eval on ScanNet test split.
+# Run via: modal run src/modal_infra/modal_eval_c3gsam.py --wait
+
+defaults:
+  - /training/feature_head_sam_precomputed
+
+mode: test
+
+wandb:
+  name: c3g_sam_scannet_distill_eval
+  mode: online
+  tags: [scannet, 224x224, sam, distillation, eval, modal, test]
+
+hydra:
+  run:
+    dir: /outputs/eval/${wandb.name}
+
+checkpointing:
+  load: /weights/distillation-base.ckpt
+  debug_log_interval: 1
+
+dataset:
+  scannet_distill:
+    roots: [/scannet]
+    sam_features_root: /precompute_sam_features/scannet
+    augment: false
+
+data_loader:
+  test:
+    batch_size: 8
+    num_workers: 4
+    persistent_workers: true
+    pin_memory: true
+    seed: 42
+
+test:
+  compute_scores: false
+  save_image: false
+  save_video: false
+  save_compare: false
+  align_pose: false
+
+trainer:
+  devices: 1
+  limit_test_batches: null
+
+eval:
+  visualization_count: 5
+  visualization_seed: 42
