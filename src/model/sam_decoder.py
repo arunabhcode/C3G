@@ -44,46 +44,94 @@ class SAMMaskDecoderWrapper(nn.Module):
             self.mask_decoder.transformer, "final_attn_token_to_image.v_proj", rank=rank
         )
 
-    def forward(
-        self, rendered_features, point_coords=None, point_labels=None, box=None
-    ):
-        B, C, H, W = rendered_features.shape
+    @staticmethod
+    def _normalize_point_prompts(
+        point_coords: torch.Tensor | None,
+        point_labels: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if point_coords is None:
+            return None
+        if point_coords.dim() == 2:
+            point_coords = point_coords.unsqueeze(1)
+        if point_labels is None:
+            raise ValueError("point_labels are required when point_coords are set.")
+        if point_labels.dim() == 1:
+            point_labels = point_labels.unsqueeze(1)
+        return point_coords, point_labels
 
-        if H != 64 or W != 64:
+    def _encode_prompts(
+        self,
+        batch_size: int,
+        device: torch.device,
+        *,
+        point_coords: torch.Tensor | None = None,
+        point_labels: torch.Tensor | None = None,
+        box: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        has_points = point_coords is not None or point_labels is not None
+        has_box = box is not None
+        if has_points and point_coords is None:
+            raise ValueError("point_coords are required when point_labels are set.")
+
+        if has_points or has_box:
+            points = None
+            if has_points:
+                point_coords, point_labels = self._normalize_point_prompts(
+                    point_coords, point_labels
+                )
+                points = (point_coords, point_labels)
+            return self.prompt_encoder(points=points, boxes=box, masks=None)
+
+        grid_pts, grid_labels = generate_grid_points(
+            batch_size, device, grid_size=GRID_SIZE
+        )
+        return self.prompt_encoder(
+            points=(grid_pts, grid_labels), boxes=None, masks=None
+        )
+
+    def forward(
+        self,
+        rendered_features: torch.Tensor,
+        point_coords: torch.Tensor | None = None,
+        point_labels: torch.Tensor | None = None,
+        box: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Run the SAM mask decoder on ``rendered_features`` (B, C, H, W).
+
+        Uses a single batched forward through ``prompt_encoder`` and ``mask_decoder``.
+        Without point/box prompts, uses segment-everything grid prompts (shared layout,
+        batch-expanded via :func:`generate_grid_points`).
+
+        Returns:
+            Low-res mask logits of shape (B, num_multimasks, mask_h, mask_w).
+        """
+        batch_size, _, height, width = rendered_features.shape
+        if batch_size == 0:
+            raise ValueError("rendered_features must have batch size > 0.")
+
+        if height != 64 or width != 64:
             image_embeddings = F.interpolate(
-                rendered_features, size=(64, 64), mode="bilinear", align_corners=False
+                rendered_features,
+                size=(64, 64),
+                mode="bilinear",
+                align_corners=False,
             )
         else:
             image_embeddings = rendered_features
 
+        sparse_emb, dense_emb = self._encode_prompts(
+            batch_size,
+            rendered_features.device,
+            point_coords=point_coords,
+            point_labels=point_labels,
+            box=box,
+        )
         image_pe = self.prompt_encoder.get_dense_pe()
-        has_prompts = point_coords is not None or box is not None
-
-        all_masks = []
-        for i in range(B):
-            if has_prompts:
-                pts = None
-                if point_coords is not None:
-                    pts = (point_coords[i : i + 1], point_labels[i : i + 1])
-                bx = box[i : i + 1] if box is not None else None
-                sparse_emb, dense_emb = self.prompt_encoder(
-                    points=pts, boxes=bx, masks=None
-                )
-            else:
-                grid_pts, grid_labels = generate_grid_points(
-                    1, rendered_features.device, grid_size=GRID_SIZE
-                )
-                sparse_emb, dense_emb = self.prompt_encoder(
-                    points=(grid_pts, grid_labels), boxes=None, masks=None
-                )
-
-            masks_i, _ = self.mask_decoder(
-                image_embeddings=image_embeddings[i : i + 1],
-                image_pe=image_pe,
-                sparse_prompt_embeddings=sparse_emb,
-                dense_prompt_embeddings=dense_emb,
-                multimask_output=True,
-            )
-            all_masks.append(masks_i)
-
-        return torch.cat(all_masks, dim=0)
+        masks, _ = self.mask_decoder(
+            image_embeddings=image_embeddings,
+            image_pe=image_pe,
+            sparse_prompt_embeddings=sparse_emb,
+            dense_prompt_embeddings=dense_emb,
+            multimask_output=True,
+        )
+        return masks
