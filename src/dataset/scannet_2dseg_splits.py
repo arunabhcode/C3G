@@ -3,9 +3,9 @@
 Scenes are ordered by scan number (``scene0000_00`` … ``scene0806_00``). The
 highest-numbered scenes are held out:
 
-- **test**: last 24 scenes (``scene0783_00`` … ``scene0806_00``)
-- **val**: 8 scenes immediately before test (``scene0775_00`` … ``scene0782_00``)
-- **train**: all earlier scenes (775 scenes)
+- **test**: last 80 scenes (``scene0727_00`` … ``scene0806_00``)
+- **val**: 80 scenes immediately before test (``scene0647_00`` … ``scene0726_00``)
+- **train**: all earlier scenes (647 scenes)
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ from typing import Literal
 
 Stage = Literal["train", "val", "test"]
 
-NUM_VAL_SCENES = 8
-NUM_TEST_SCENES = 24
+NUM_VAL_SCENES = 80
+NUM_TEST_SCENES = 80
 SCENE_ID_TEMPLATE = "scene{index:04d}_00"
 ALL_SCENE_IDS = tuple(SCENE_ID_TEMPLATE.format(index=i) for i in range(807))
 

@@ -1,16 +1,17 @@
 # @package _global_
-# Modal C3G SAM distillation eval on ScanNet test split.
+# Modal C3G SAM distillation eval on Replica + ScanNet test (vanilla-eval layout).
 # Run via: modal run src/modal_infra/modal_eval_c3gsam.py --wait
 
 defaults:
   - /training/feature_head_sam_precomputed
+  - /dataset@_group_.replica_distill: replica_distill
 
 mode: test
 
 wandb:
-  name: c3g_sam_scannet_distill_eval
+  name: c3g_sam_distill_eval
   mode: online
-  tags: [scannet, 224x224, sam, distillation, eval, modal, test]
+  tags: [replica, scannet, sam, distillation, eval, modal, test]
 
 hydra:
   run:
@@ -21,11 +22,16 @@ checkpointing:
   debug_log_interval: 1
 
 dataset:
+  replica_distill:
+    roots: [/replica]
+    sam_features_root: /precompute_sam_features/replica
+    augment: false
+    view_sampler:
+      num_target_views: 1
   scannet_distill:
     roots: [/scannet]
     sam_features_root: /precompute_sam_features/scannet
     augment: false
-    # Mask export only uses target view 0; avoid loading/rendering neighbors.
     view_sampler:
       num_target_views: 1
 

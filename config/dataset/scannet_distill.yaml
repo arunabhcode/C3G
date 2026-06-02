@@ -9,8 +9,8 @@ roots: [datasets/scannet]
 sam_features_root: null
 # Empty list: discover all scenes on disk and split by scan number (see scannet_2dseg_splits).
 scenes: []
-val_scene_count: 8
-test_scene_count: 24
+val_scene_count: 80
+test_scene_count: 80
 make_baseline_1: true
 augment: true
 

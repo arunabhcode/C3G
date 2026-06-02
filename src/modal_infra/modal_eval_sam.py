@@ -16,6 +16,9 @@ Full eval (Replica + ScanNet test split)::
     modal run src/modal_infra/modal_eval_sam.py --wait
     modal run --detach src/modal_infra/modal_eval_sam.py
 
+Scenes (and individual frames) that already have mask PNGs on the output volume
+are skipped automatically so reruns resume where they left off.
+
 Local image + label::
 
     modal run src/modal_infra/modal_eval_sam.py \\
@@ -55,7 +58,10 @@ from src.modal_infra.modal_common import (
     WEIGHTS_VOLUME,
     DatasetName,
     build_eval_sam_modal_image,
+    expected_mask_class_ids,
+    filter_scenes_for_mask_export,
     find_smoke_frame,
+    frame_mask_export_complete,
     iter_dataset_frames,
     resolve_dataset_root,
     resolve_detach,
@@ -313,9 +319,10 @@ def _eval_labeled_frames(
     prompt_strategy: str,
     min_object_pixels: int,
     batch_size: int,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     saved_masks = 0
     skipped_frames = 0
+    skipped_existing_frames = 0
     batch_items: list[tuple[str, str, int, bytes]] = []
     batch_prompts: list[tuple[list[list[float]], list[int]]] = []
 
@@ -349,6 +356,15 @@ def _eval_labeled_frames(
                 f"[{dataset_name}] Progress {index}/{total} — {scene_id}/{paths.frame_id}"
             )
 
+        class_ids = expected_mask_class_ids(
+            paths.label, min_object_pixels=min_object_pixels
+        )
+        if frame_mask_export_complete(
+            pred_root, scene_id, paths.frame_id, class_ids
+        ):
+            skipped_existing_frames += 1
+            continue
+
         try:
             class_prompts = _class_prompts_from_label(
                 paths.label,
@@ -376,7 +392,7 @@ def _eval_labeled_frames(
                 _flush_batch()
 
     _flush_batch()
-    return saved_masks, skipped_frames
+    return saved_masks, skipped_frames, skipped_existing_frames
 
 
 @app.cls(
@@ -473,36 +489,74 @@ class VanillaSAMInference:
         dataset_stats: dict[str, dict[str, Any]] = {}
         total_saved = 0
         total_skipped_frames = 0
+        total_skipped_existing_frames = 0
 
         for dataset_name, scenes in VANILLA_EVAL_DATASETS:
             root = Path(dataset_roots[dataset_name])
             pred_root = output_root / dataset_name
-            print(f"Evaluating {dataset_name}: {len(scenes)} scenes under {root}")
-            frames = iter_dataset_frames(root, scenes)
-            saved_masks, skipped_frames = _eval_labeled_frames(
-                self.sam,
-                self.device,
-                dataset_name=dataset_name,
-                frames=frames,
-                pred_root=pred_root,
-                prompt_strategy=prompt_strategy,
+            scenes_to_run, skipped_scenes = filter_scenes_for_mask_export(
+                root,
+                scenes,
+                pred_root,
                 min_object_pixels=min_object_pixels,
-                batch_size=batch_size,
+            )
+            if skipped_scenes:
+                print(
+                    f"[{dataset_name}] Skipping {len(skipped_scenes)} scenes "
+                    f"already on volume under {pred_root}"
+                )
+            if not scenes_to_run:
+                print(f"[{dataset_name}] All scenes already exported — nothing to run.")
+                dataset_stats[dataset_name] = {
+                    "dataset_root": str(root),
+                    "output_root": str(pred_root),
+                    "scenes": scenes,
+                    "scenes_to_run": [],
+                    "skipped_scenes": skipped_scenes,
+                    "saved_masks": 0,
+                    "skipped_frames": 0,
+                    "skipped_existing_frames": 0,
+                }
+                if dataset_name == "scannet":
+                    dataset_stats[dataset_name]["split"] = "test"
+                continue
+
+            print(
+                f"Evaluating {dataset_name}: {len(scenes_to_run)} scenes "
+                f"({len(skipped_scenes)} already on volume) under {root}"
+            )
+            frames = iter_dataset_frames(root, scenes_to_run)
+            saved_masks, skipped_frames, skipped_existing_frames = (
+                _eval_labeled_frames(
+                    self.sam,
+                    self.device,
+                    dataset_name=dataset_name,
+                    frames=frames,
+                    pred_root=pred_root,
+                    prompt_strategy=prompt_strategy,
+                    min_object_pixels=min_object_pixels,
+                    batch_size=batch_size,
+                )
             )
             dataset_stats[dataset_name] = {
                 "dataset_root": str(root),
                 "output_root": str(pred_root),
                 "scenes": scenes,
+                "scenes_to_run": scenes_to_run,
+                "skipped_scenes": skipped_scenes,
                 "saved_masks": saved_masks,
                 "skipped_frames": skipped_frames,
+                "skipped_existing_frames": skipped_existing_frames,
             }
             if dataset_name == "scannet":
                 dataset_stats[dataset_name]["split"] = "test"
             total_saved += saved_masks
             total_skipped_frames += skipped_frames
+            total_skipped_existing_frames += skipped_existing_frames
             print(
                 f"[{dataset_name}] Done — saved {saved_masks} masks "
-                f"({skipped_frames} frames skipped)."
+                f"({skipped_frames} frames skipped, "
+                f"{skipped_existing_frames} already on volume)."
             )
 
         manifest = {
@@ -512,6 +566,7 @@ class VanillaSAMInference:
             "batch_size": batch_size,
             "saved_masks": total_saved,
             "skipped_frames": total_skipped_frames,
+            "skipped_existing_frames": total_skipped_existing_frames,
         }
         output_root.mkdir(parents=True, exist_ok=True)
         (output_root / "manifest.json").write_text(
@@ -522,7 +577,8 @@ class VanillaSAMInference:
 
         print(
             f"Eval complete — saved {total_saved} masks "
-            f"({total_skipped_frames} frames skipped)."
+            f"({total_skipped_frames} frames skipped, "
+            f"{total_skipped_existing_frames} already on volume)."
         )
         print(f"  Output volume: `{VANILLA_SAM_OUTPUT_VOLUME}`")
         return str(output_root)

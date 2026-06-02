@@ -24,11 +24,11 @@ REPLICA_2DSEG_SCENES = [
     "room1",
     "room2",
 ]
-# Train split: scene0000_00 … scene0774_00 (775 scenes). Val then test = last 32 on volume.
+# Train split: scene0000_00 … scene0646_00 (647 scenes). Val then test = last 160 on volume.
 # See src/dataset/scannet_2dseg_splits.py (avoid importing src.dataset here — pulls torch).
-SCANNET_2DSEG_SCENES = [f"scene{i:04d}_00" for i in range(807 - 8 - 24)]
-# Test split: scene0783_00 … scene0806_00 (24 scenes).
-SCANNET_2DSEG_TEST_SCENES = [f"scene{i:04d}_00" for i in range(807 - 24, 807)]
+SCANNET_2DSEG_SCENES = [f"scene{i:04d}_00" for i in range(807 - 80 - 80)]
+# Test split: scene0727_00 … scene0806_00 (80 scenes).
+SCANNET_2DSEG_TEST_SCENES = [f"scene{i:04d}_00" for i in range(807 - 80, 807)]
 
 DatasetName = Literal["replica", "scannet"]
 
@@ -36,6 +36,12 @@ DatasetName = Literal["replica", "scannet"]
 VANILLA_EVAL_DATASETS: list[tuple[DatasetName, list[str]]] = [
     ("replica", REPLICA_2DSEG_SCENES),
     ("scannet", SCANNET_2DSEG_TEST_SCENES),
+]
+
+# C3G distillation mask export: output subdir, Hydra dataset group name, scene list.
+C3G_EVAL_DATASETS: list[tuple[DatasetName, str, list[str]]] = [
+    ("replica", "replica_distill", REPLICA_2DSEG_SCENES),
+    ("scannet", "scannet_distill", SCANNET_2DSEG_TEST_SCENES),
 ]
 WEIGHTS_VOLUME = "c3g-weights"
 OUTPUT_VOLUME = "c3g-train-outputs"
@@ -228,6 +234,8 @@ def find_smoke_frame(
 def iter_dataset_frames(
     dataset_root: str | Path,
     scenes: list[str],
+    *,
+    require_frames: bool = True,
 ) -> list[tuple[str, FramePaths]]:
     """List every (scene_id, frame paths) with image + label on disk."""
     from src.misc.frame_layout import FramePaths, list_frame_ids
@@ -242,12 +250,98 @@ def iter_dataset_frames(
             paths = FramePaths.from_frame_id(scene_dir, frame_id)
             if paths.image.is_file() and paths.label.is_file():
                 frames.append((scene_id, paths))
-    if not frames:
+    if require_frames and not frames:
         raise FileNotFoundError(
             f"No labeled frames found under {root} for scenes {scenes}. "
             "Run the dataset download script to populate the volume."
         )
     return frames
+
+
+def expected_mask_class_ids(
+    label_path: Path,
+    *,
+    min_object_pixels: int = 16,
+) -> list[int]:
+    """Class ids that would receive a mask PNG (matches eval export skips)."""
+    import numpy as np
+    from PIL import Image
+
+    label_np = np.array(Image.open(label_path))
+    class_ids: list[int] = []
+    for obj_id in np.unique(label_np):
+        if obj_id == 0:
+            continue
+        if (label_np == obj_id).sum() < min_object_pixels:
+            continue
+        class_ids.append(int(obj_id))
+    return class_ids
+
+
+def frame_mask_export_complete(
+    pred_root: Path,
+    scene_id: str,
+    frame_id: str,
+    class_ids: list[int],
+) -> bool:
+    """True when every expected class mask PNG exists for this frame."""
+    if not class_ids:
+        return True
+    frame_dir = pred_root / scene_id / frame_id
+    return all((frame_dir / f"{class_id}.png").is_file() for class_id in class_ids)
+
+
+def scene_mask_export_complete(
+    dataset_root: Path,
+    scene_id: str,
+    pred_root: Path,
+    *,
+    min_object_pixels: int = 16,
+) -> bool:
+    """True when all labeled frames in ``scene_id`` already have exported masks."""
+    from src.misc.frame_layout import FramePaths, list_frame_ids
+
+    scene_dir = dataset_root / scene_id
+    if not scene_dir.is_dir():
+        return False
+
+    has_labeled_frame = False
+    for frame_id in list_frame_ids(scene_dir):
+        paths = FramePaths.from_frame_id(scene_dir, frame_id)
+        if not (paths.image.is_file() and paths.label.is_file()):
+            continue
+        has_labeled_frame = True
+        class_ids = expected_mask_class_ids(
+            paths.label, min_object_pixels=min_object_pixels
+        )
+        if not frame_mask_export_complete(
+            pred_root, scene_id, frame_id, class_ids
+        ):
+            return False
+
+    return has_labeled_frame
+
+
+def filter_scenes_for_mask_export(
+    dataset_root: str | Path,
+    scenes: list[str],
+    pred_root: str | Path,
+    *,
+    min_object_pixels: int = 16,
+) -> tuple[list[str], list[str]]:
+    """Return ``(scenes_to_run, scenes_already_on_volume)``."""
+    root = Path(dataset_root)
+    out = Path(pred_root)
+    pending: list[str] = []
+    skipped: list[str] = []
+    for scene_id in scenes:
+        if scene_mask_export_complete(
+            root, scene_id, out, min_object_pixels=min_object_pixels
+        ):
+            skipped.append(scene_id)
+        else:
+            pending.append(scene_id)
+    return pending, skipped
 
 
 C3G_MODAL_WORKSPACE = Path("/workspace")

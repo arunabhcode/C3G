@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Modal runner for C3G SAM distillation eval on ScanNet test.
+"""Modal runner for C3G SAM distillation eval on Replica + ScanNet test.
 
 Exports per-class masks (same layout as ``modal_eval_sam``) using a distillation
 checkpoint on ``c3g-weights``: one C3G forward per frame, batched SAM mask-decoder
@@ -9,24 +9,28 @@ Prerequisites (once)::
 
     modal volume put c3g-weights /path/to/distillation-base.ckpt distillation-base.ckpt
     modal volume put c3g-weights /path/to/sam_vit_h.pth sam_vit_h.pth
-    # ScanNet frames on ``scannet`` volume.
-    # Precomputed ``*_sam.pt`` on ``precompute_sam_features`` at ``scannet/``.
+    # Replica + ScanNet frames on ``replica`` / ``scannet`` volumes.
+    # Precomputed ``*_sam.pt`` on ``precompute_sam_features`` at ``replica/`` and ``scannet/``.
 
-Full eval (ScanNet test split, mask export)::
+Full eval (Replica + ScanNet test split, mask export)::
 
     modal run src/modal_infra/modal_eval_c3gsam.py --wait
     modal run --detach src/modal_infra/modal_eval_c3gsam.py
+
+Scenes (and individual frames) that already have mask PNGs on the output volume
+are skipped automatically so reruns resume where they left off.
 
 Optional Lightning test metrics + W&B debug tables::
 
     modal run src/modal_infra/modal_eval_c3gsam.py --with-lightning-test --wait
 
-Smoke (one frame, masks only)::
+Smoke (one labeled frame per dataset, masks only)::
 
     modal run src/modal_infra/modal_eval_c3gsam.py::smoke --wait
 
 Masks on ``c3g-sam-eval-outputs``::
 
+    c3g-sam-eval-outputs/replica/<scene>/<frame_id>/<class_id>.png
     c3g-sam-eval-outputs/scannet/<scene>/<frame_id>/<class_id>.png
 """
 
@@ -40,12 +44,15 @@ from pathlib import Path
 import modal
 
 from src.modal_infra.modal_common import (
+    C3G_EVAL_DATASETS,
     C3G_MODAL_WORKSPACE,
     C3G_SAM_EVAL_OUTPUT_MOUNT,
     C3G_SAM_EVAL_OUTPUT_VOLUME,
+    DATASET_SPECS,
     PRECOMPUTE_SAM_FEATURES_MOUNT,
     PRECOMPUTE_SAM_FEATURES_VOLUME,
-    SCANNET_2DSEG_TEST_SCENES,
+    REPLICA_MOUNT,
+    REPLICA_VOLUME,
     SCANNET_MOUNT,
     SCANNET_VOLUME,
     WEIGHTS_MOUNT,
@@ -57,7 +64,7 @@ from src.modal_infra.modal_common import (
 )
 
 APP_NAME = "c3g-sam-distill-eval"
-EVALUATION_CONFIG = "c3g_sam_scannet_distill"
+EVALUATION_CONFIG = "c3g_sam_distill"
 WANDB_SECRET = modal.Secret.from_name("wandb")
 
 DEFAULT_CHECKPOINT = "distillation-base.ckpt"
@@ -67,6 +74,7 @@ DEFAULT_VISUALIZATION_SEED = 42
 
 app = modal.App(APP_NAME)
 weights_volume = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
+replica_volume = modal.Volume.from_name(REPLICA_VOLUME, create_if_missing=True)
 scannet_volume = modal.Volume.from_name(SCANNET_VOLUME, create_if_missing=True)
 precompute_volume = modal.Volume.from_name(
     PRECOMPUTE_SAM_FEATURES_VOLUME, create_if_missing=True
@@ -77,6 +85,7 @@ c3g_eval_output_volume = modal.Volume.from_name(
 
 VOLUMES = {
     str(WEIGHTS_MOUNT): weights_volume,
+    str(REPLICA_MOUNT): replica_volume,
     str(SCANNET_MOUNT): scannet_volume,
     str(PRECOMPUTE_SAM_FEATURES_MOUNT): precompute_volume,
     str(C3G_SAM_EVAL_OUTPUT_MOUNT): c3g_eval_output_volume,
@@ -147,16 +156,21 @@ def eval_c3gsam(
     limit_frames: int | None = None,
     limit_test_batches: int | None = None,
 ) -> str:
-    """Export C3G masks on ScanNet test; optionally run Lightning test metrics."""
+    """Export C3G masks on Replica + ScanNet test; optionally run Lightning test."""
     checkpoint_path = resolve_distillation_checkpoint(WEIGHTS_MOUNT / checkpoint_name)
-    if not SCANNET_MOUNT.is_dir():
-        raise FileNotFoundError(
-            f"ScanNet volume not mounted at {SCANNET_MOUNT}. "
-            f"Populate the `{SCANNET_VOLUME}` volume via the download script."
-        )
+
+    for dataset_name, _, _ in C3G_EVAL_DATASETS:
+        spec = DATASET_SPECS[dataset_name]
+        mount = REPLICA_MOUNT if dataset_name == "replica" else SCANNET_MOUNT
+        if not mount.is_dir():
+            raise FileNotFoundError(
+                f"{spec['label']} dataset not mounted at {mount}. "
+                f"Populate the `{spec['volume']}` volume via the download script."
+            )
 
     print(f"Checkpoint: {checkpoint_path}")
-    print(f"Test scenes: {len(SCANNET_2DSEG_TEST_SCENES)}")
+    for dataset_name, _, scenes in C3G_EVAL_DATASETS:
+        print(f"  {dataset_name}: {len(scenes)} scenes")
     print(f"Mask batch size (classes per SAM forward): {mask_batch_size}")
 
     mask_cmd = _build_mask_export_command(
@@ -173,12 +187,19 @@ def eval_c3gsam(
             raise RuntimeError(
                 "wandb.mode=online requires WANDB_API_KEY in the Modal `wandb` secret."
             )
-        visualization_keys = sample_eval_visualization_keys(
-            SCANNET_MOUNT,
-            list(SCANNET_2DSEG_TEST_SCENES),
-            count=visualization_count,
-            seed=visualization_seed,
-        )
+        visualization_keys: list[str] = []
+        per_dataset = max(1, visualization_count // len(C3G_EVAL_DATASETS))
+        for dataset_name, _, scenes in C3G_EVAL_DATASETS:
+            mount = REPLICA_MOUNT if dataset_name == "replica" else SCANNET_MOUNT
+            visualization_keys.extend(
+                sample_eval_visualization_keys(
+                    mount,
+                    list(scenes),
+                    count=per_dataset,
+                    seed=visualization_seed,
+                )
+            )
+        visualization_keys = visualization_keys[:visualization_count]
         print("Debug visualization frames:")
         for key in visualization_keys:
             print(f"  - {key}")
@@ -208,7 +229,7 @@ def main(
     detach: bool | None = None,
     wait: bool = False,
 ) -> None:
-    """Full C3G distillation mask export on ScanNet test."""
+    """Full C3G distillation mask export on Replica + ScanNet test."""
     from src.misc.modal_run import dispatch_remote
 
     dispatch_remote(
@@ -220,7 +241,7 @@ def main(
         wandb_mode=wandb_mode,
         with_lightning_test=with_lightning_test,
         detach=resolve_detach(detach=detach, remote_job=not wait),
-        job_name="C3G SAM ScanNet distill eval",
+        job_name="C3G SAM Replica+ScanNet distill eval",
         app_name=APP_NAME,
     )
 
@@ -232,7 +253,7 @@ def smoke(
     detach: bool | None = None,
     wait: bool = False,
 ) -> None:
-    """Export masks for a single test frame (fast smoke)."""
+    """Export masks for one labeled frame per dataset (fast smoke)."""
     from src.misc.modal_run import dispatch_remote
 
     dispatch_remote(
@@ -241,6 +262,6 @@ def smoke(
         mask_batch_size=mask_batch_size,
         limit_frames=1,
         detach=resolve_detach(detach=detach, remote_job=not wait),
-        job_name="C3G SAM ScanNet distill eval smoke",
+        job_name="C3G SAM Replica+ScanNet distill eval smoke",
         app_name=APP_NAME,
     )

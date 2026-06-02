@@ -89,6 +89,36 @@ class SAMMaskDecoderWrapper(nn.Module):
             points=(grid_pts, grid_labels), boxes=None, masks=None
         )
 
+    def _forward_single(
+        self,
+        image_embeddings: torch.Tensor,
+        *,
+        point_coords: torch.Tensor | None = None,
+        point_labels: torch.Tensor | None = None,
+        box: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Run mask decoder for one embedding (1, C, 64, 64).
+
+        SAM's ``predict_masks`` repeats image embeddings by ``tokens.shape[0]``,
+        which only matches a single-image batch. Callers with B>1 must loop here.
+        """
+        sparse_emb, dense_emb = self._encode_prompts(
+            1,
+            image_embeddings.device,
+            point_coords=point_coords,
+            point_labels=point_labels,
+            box=box,
+        )
+        image_pe = self.prompt_encoder.get_dense_pe()
+        masks, _ = self.mask_decoder(
+            image_embeddings=image_embeddings,
+            image_pe=image_pe,
+            sparse_prompt_embeddings=sparse_emb,
+            dense_prompt_embeddings=dense_emb,
+            multimask_output=True,
+        )
+        return masks
+
     def forward(
         self,
         rendered_features: torch.Tensor,
@@ -98,9 +128,9 @@ class SAMMaskDecoderWrapper(nn.Module):
     ) -> torch.Tensor:
         """Run the SAM mask decoder on ``rendered_features`` (B, C, H, W).
 
-        Uses a single batched forward through ``prompt_encoder`` and ``mask_decoder``.
-        Without point/box prompts, uses segment-everything grid prompts (shared layout,
-        batch-expanded via :func:`generate_grid_points`).
+        Without point/box prompts, uses segment-everything grid prompts per image.
+        Batched mask-decoder calls are implemented as per-sample loops because
+        SAM's mask decoder repeats embeddings by the prompt batch dimension.
 
         Returns:
             Low-res mask logits of shape (B, num_multimasks, mask_h, mask_w).
@@ -119,19 +149,29 @@ class SAMMaskDecoderWrapper(nn.Module):
         else:
             image_embeddings = rendered_features
 
-        sparse_emb, dense_emb = self._encode_prompts(
-            batch_size,
-            rendered_features.device,
-            point_coords=point_coords,
-            point_labels=point_labels,
-            box=box,
-        )
-        image_pe = self.prompt_encoder.get_dense_pe()
-        masks, _ = self.mask_decoder(
-            image_embeddings=image_embeddings,
-            image_pe=image_pe,
-            sparse_prompt_embeddings=sparse_emb,
-            dense_prompt_embeddings=dense_emb,
-            multimask_output=True,
-        )
-        return masks
+        if batch_size == 1:
+            return self._forward_single(
+                image_embeddings,
+                point_coords=point_coords,
+                point_labels=point_labels,
+                box=box,
+            )
+
+        masks = []
+        for index in range(batch_size):
+            sample_coords = (
+                point_coords[index : index + 1] if point_coords is not None else None
+            )
+            sample_labels = (
+                point_labels[index : index + 1] if point_labels is not None else None
+            )
+            sample_box = box[index : index + 1] if box is not None else None
+            masks.append(
+                self._forward_single(
+                    image_embeddings[index : index + 1],
+                    point_coords=sample_coords,
+                    point_labels=sample_labels,
+                    box=sample_box,
+                )
+            )
+        return torch.cat(masks, dim=0)

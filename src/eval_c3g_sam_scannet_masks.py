@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Export C3G-rendered SAM masks on ScanNet test (vanilla-eval layout).
+"""Export C3G-rendered SAM masks on Replica + ScanNet test (vanilla-eval layout).
 
 One C3G forward per labeled frame, then batched SAM mask-decoder calls per class
 (same coverage pattern as ``modal_eval_sam``).
 
 Output layout::
 
+    <output_root>/replica/<scene_id>/<frame_id>/<class_id>.png
     <output_root>/scannet/<scene_id>/<frame_id>/<class_id>.png
 
 Run on Modal via ``modal_eval_c3gsam.py`` or locally::
 
     python -m src.eval_c3g_sam_scannet_masks \\
-        +evaluation=c3g_sam_scannet_distill \\
+        +evaluation=c3g_sam_distill \\
         checkpointing.load=/path/to/distillation-base.ckpt
 """
 
@@ -20,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Protocol
 
 import hydra
 import torch
@@ -31,18 +33,23 @@ from PIL import Image
 from src.config import load_typed_root_config
 from src.dataset import get_dataset
 from src.dataset.data_module import get_data_shim
-from src.dataset.dataset_scannet_distill import DatasetScannetDistill
 from src.dataset.types import BatchedExample
 from src.evaluation.mask_metrics import best_multimask_scores
 from src.global_cfg import set_cfg
 from src.misc.step_tracker import StepTracker
-from src.modal_infra.modal_common import iter_dataset_frames
+from src.modal_infra.modal_common import (
+    C3G_EVAL_DATASETS,
+    expected_mask_class_ids,
+    filter_scenes_for_mask_export,
+    frame_mask_export_complete,
+    iter_dataset_frames,
+)
 from src.model.decoder import get_decoder
 from src.model.distillation_wrapper import (
     DebugDecoderCfg,
     DistillationModelWrapper,
-    DistillOptimizerCfg,
     DistillTrainCfg,
+    OptimizerCfg as DistillOptimizerCfg,
 )
 from src.model.encoder import get_encoder
 from src.model.prompt_sampler import PromptSampler, decompose_label_map
@@ -51,6 +58,12 @@ from src.model.types import Gaussians
 from src.loss import get_losses
 
 logger = logging.getLogger(__name__)
+
+
+class DistillMaskExportDataset(Protocol):
+    cfg: object
+
+    def _build_visualization_batch(self, scene: str, frame_id: str) -> dict | None: ...
 
 
 def _batch_to_device(batch: BatchedExample, device: torch.device) -> BatchedExample:
@@ -209,10 +222,11 @@ def _flush_mask_batch(
 
 
 @torch.no_grad()
-def export_scannet_test_masks(
+def export_distill_masks(
+    dataset_name: str,
     wrapper: DistillationModelWrapper,
     mask_decoder: SAMMaskDecoderWrapper,
-    distill_dataset: DatasetScannetDistill,
+    distill_dataset: DistillMaskExportDataset,
     frames: list,
     pred_root: Path,
     image_shape: tuple[int, int],
@@ -221,20 +235,31 @@ def export_scannet_test_masks(
     min_object_pixels: int,
     mask_batch_size: int,
 ) -> dict[str, int]:
-    """Export masks for every labeled test frame and class."""
+    """Export masks for every labeled frame and class in one dataset split."""
     data_shim = get_data_shim(wrapper.encoder)
     device = next(wrapper.parameters()).device
 
     saved_masks = 0
     skipped_frames = 0
+    skipped_existing_frames = 0
     total = len(frames)
 
     for index, (scene_id, paths) in enumerate(frames):
         if index % 50 == 0:
             print(
-                f"[scannet] Progress {index}/{total} — {scene_id}/{paths.frame_id}",
+                f"[{dataset_name}] Progress {index}/{total} — "
+                f"{scene_id}/{paths.frame_id}",
                 flush=True,
             )
+
+        class_ids = expected_mask_class_ids(
+            paths.label, min_object_pixels=min_object_pixels
+        )
+        if frame_mask_export_complete(
+            pred_root, scene_id, paths.frame_id, class_ids
+        ):
+            skipped_existing_frames += 1
+            continue
 
         try:
             class_prompts = class_prompts_from_label(
@@ -244,13 +269,13 @@ def export_scannet_test_masks(
                 min_object_pixels=min_object_pixels,
             )
         except ValueError as exc:
-            print(f"[scannet] Skip {scene_id}/{paths.frame_id}: {exc}")
+            print(f"[{dataset_name}] Skip {scene_id}/{paths.frame_id}: {exc}")
             skipped_frames += 1
             continue
 
         if not class_prompts:
             print(
-                f"[scannet] Skip {scene_id}/{paths.frame_id}: "
+                f"[{dataset_name}] Skip {scene_id}/{paths.frame_id}: "
                 "no objects with enough pixels"
             )
             skipped_frames += 1
@@ -259,7 +284,7 @@ def export_scannet_test_masks(
         example = distill_dataset._build_visualization_batch(scene_id, paths.frame_id)
         if example is None:
             print(
-                f"[scannet] Skip {scene_id}/{paths.frame_id}: "
+                f"[{dataset_name}] Skip {scene_id}/{paths.frame_id}: "
                 "could not build multi-view example"
             )
             skipped_frames += 1
@@ -297,6 +322,7 @@ def export_scannet_test_masks(
     return {
         "saved_masks": saved_masks,
         "skipped_frames": skipped_frames,
+        "skipped_existing_frames": skipped_existing_frames,
     }
 
 
@@ -393,61 +419,146 @@ def main(cfg_dict: DictConfig) -> None:
     mask_decoder.eval()
 
     typed_cfg = load_typed_root_config(cfg_dict)
-    distill_cfg = cfg_dict.dataset.scannet_distill
-    image_shape = tuple(distill_cfg.input_image_shape)
-    root = Path(distill_cfg.roots[0])
-
     datasets = get_dataset(typed_cfg.dataset, "test", StepTracker())
-    distill_dataset = next(
-        ds for ds in datasets if isinstance(ds, DatasetScannetDistill)
-    )
+    datasets_by_name = {ds.cfg.name: ds for ds in datasets}
 
     from src.dataset.scannet_2dseg_splits import scenes_for_stage
 
-    scene_ids = scenes_for_stage(
-        "test",
-        root=root,
-        num_val=distill_cfg.val_scene_count,
-        num_test=distill_cfg.test_scene_count,
-    )
-    frames = iter_dataset_frames(root, scene_ids)
-    limit_frames = eval_cfg.get("limit_frames")
-    if limit_frames is not None:
-        frames = frames[: int(limit_frames)]
-
     output_root = Path(eval_cfg.get("mask_output_dir", "outputs/c3g_sam_eval"))
-    pred_root = output_root / "scannet"
-    pred_root.mkdir(parents=True, exist_ok=True)
+    output_root.mkdir(parents=True, exist_ok=True)
 
-    stats = export_scannet_test_masks(
-        wrapper,
-        mask_decoder,
-        distill_dataset,
-        frames,
-        pred_root,
-        image_shape,
-        prompt_strategy=eval_cfg.get("prompt_strategy", "centroid"),
-        min_object_pixels=int(eval_cfg.get("min_object_pixels", 16)),
-        mask_batch_size=int(eval_cfg.get("mask_batch_size", 32)),
-    )
+    limit_frames = eval_cfg.get("limit_frames")
+    prompt_strategy = eval_cfg.get("prompt_strategy", "centroid")
+    min_object_pixels = int(eval_cfg.get("min_object_pixels", 16))
+    mask_batch_size = int(eval_cfg.get("mask_batch_size", 32))
+
+    dataset_stats: dict[str, dict] = {}
+    total_saved = 0
+    total_skipped = 0
+    total_skipped_existing = 0
+
+    for dataset_name, cfg_name, default_scenes in C3G_EVAL_DATASETS:
+        if cfg_name not in cfg_dict.dataset:
+            raise ValueError(
+                f"Eval requires dataset.{cfg_name} in config; "
+                f"add it to the evaluation Hydra defaults."
+            )
+
+        distill_cfg = cfg_dict.dataset[cfg_name]
+        distill_dataset = datasets_by_name.get(cfg_name)
+        if distill_dataset is None:
+            raise ValueError(f"No test dataset instance for {cfg_name}")
+
+        root = Path(distill_cfg.roots[0])
+        if cfg_name == "scannet_distill":
+            scene_ids = scenes_for_stage(
+                "test",
+                root=root,
+                num_val=distill_cfg.val_scene_count,
+                num_test=distill_cfg.test_scene_count,
+            )
+        else:
+            scene_ids = list(distill_cfg.get("scenes", default_scenes))
+
+        pred_root = output_root / dataset_name
+        pred_root.mkdir(parents=True, exist_ok=True)
+        scenes_to_run, skipped_scenes = filter_scenes_for_mask_export(
+            root,
+            scene_ids,
+            pred_root,
+            min_object_pixels=min_object_pixels,
+        )
+        if skipped_scenes:
+            print(
+                f"[{dataset_name}] Skipping {len(skipped_scenes)} scenes "
+                f"already on volume under {pred_root}",
+                flush=True,
+            )
+        if not scenes_to_run:
+            print(
+                f"[{dataset_name}] All scenes already exported — nothing to run.",
+                flush=True,
+            )
+            dataset_stats[dataset_name] = {
+                "dataset_root": str(root),
+                "output_root": str(pred_root),
+                "scenes": scene_ids,
+                "scenes_to_run": [],
+                "skipped_scenes": skipped_scenes,
+                "saved_masks": 0,
+                "skipped_frames": 0,
+                "skipped_existing_frames": 0,
+            }
+            if cfg_name == "scannet_distill":
+                dataset_stats[dataset_name]["split"] = "test"
+            continue
+
+        frames = iter_dataset_frames(root, scenes_to_run)
+        if limit_frames is not None:
+            frames = frames[: int(limit_frames)]
+
+        image_shape = tuple(distill_cfg.input_image_shape)
+
+        print(
+            f"Evaluating {dataset_name}: {len(scenes_to_run)} scenes "
+            f"({len(skipped_scenes)} already on volume), "
+            f"{len(frames)} labeled frames under {root}",
+            flush=True,
+        )
+
+        stats = export_distill_masks(
+            dataset_name,
+            wrapper,
+            mask_decoder,
+            distill_dataset,
+            frames,
+            pred_root,
+            image_shape,
+            prompt_strategy=prompt_strategy,
+            min_object_pixels=min_object_pixels,
+            mask_batch_size=mask_batch_size,
+        )
+
+        entry: dict = {
+            "dataset_root": str(root),
+            "output_root": str(pred_root),
+            "scenes": scene_ids,
+            "scenes_to_run": scenes_to_run,
+            "skipped_scenes": skipped_scenes,
+            **stats,
+        }
+        if cfg_name == "scannet_distill":
+            entry["split"] = "test"
+
+        dataset_stats[dataset_name] = entry
+        total_saved += stats["saved_masks"]
+        total_skipped += stats["skipped_frames"]
+        total_skipped_existing += stats["skipped_existing_frames"]
+        print(
+            f"[{dataset_name}] Done — saved {stats['saved_masks']} masks "
+            f"({stats['skipped_frames']} frames skipped, "
+            f"{stats['skipped_existing_frames']} already on volume).",
+            flush=True,
+        )
 
     manifest = {
         "checkpoint": str(checkpoint_path),
-        "dataset_root": str(root),
-        "output_root": str(pred_root),
-        "test_scenes": scene_ids,
-        "prompt_strategy": eval_cfg.get("prompt_strategy", "centroid"),
-        "min_object_pixels": eval_cfg.get("min_object_pixels", 16),
-        "mask_batch_size": eval_cfg.get("mask_batch_size", 32),
-        **stats,
+        "datasets": dataset_stats,
+        "prompt_strategy": prompt_strategy,
+        "min_object_pixels": min_object_pixels,
+        "mask_batch_size": mask_batch_size,
+        "saved_masks": total_saved,
+        "skipped_frames": total_skipped,
+        "skipped_existing_frames": total_skipped_existing,
     }
     (output_root / "manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n",
         encoding="utf-8",
     )
     print(
-        f"Mask export complete — saved {stats['saved_masks']} masks "
-        f"({stats['skipped_frames']} frames skipped) under {pred_root}"
+        f"Mask export complete — saved {total_saved} masks "
+        f"({total_skipped} frames skipped, "
+        f"{total_skipped_existing} already on volume) under {output_root}"
     )
 
 

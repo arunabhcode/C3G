@@ -34,8 +34,8 @@ data_loader:
     pin_memory: true
     batch_size: 8
     seed: 3456
-    # One batch per val scene when using ScanNet 2dseg (8 val scenes).
-    limit_batches: 8
+    # One batch per val scene when using ScanNet 2dseg (80 val scenes).
+    limit_batches: 80
 
 optimizer:
   lr: 1.5e-4
