@@ -24,3 +24,5 @@ skip_bad_shape: false
 num_of_inputs: 2
 prompt_strategy: centroid
 min_object_pixels: 16
+# Precomputed SAM encoder features (256×64×64); omit sam_image resize when set.
+sam_features_root: null

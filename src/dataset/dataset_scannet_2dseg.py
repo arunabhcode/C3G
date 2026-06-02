@@ -11,7 +11,9 @@ and :mod:`dataset_replica_semseg`; only scene ids and on-disk paths differ.
 
 For C3G-SAM dual-resolution, each view also includes ``sam_image``: source RGB
 resized directly to the SAM encoder size (1024×1024), independent of
-``input_image_shape`` (252×252 for VGGT/splatting).
+``input_image_shape`` (252×252 for VGGT/splatting). When ``sam_features_root`` is
+set, precomputed ``{frame_id}_sam.pt`` tensors (256×64×64) are loaded instead and
+``sam_image`` is omitted.
 
 Each yielded sample has ``view_sampler.num_context_views`` context frames (typically
 2) and ``view_sampler.num_target_views`` target frames. When the sampler returns
@@ -61,6 +63,7 @@ class Scannet2dSegCfg(DatasetCfgCommon):
     num_of_inputs: int = 2
     prompt_strategy: str = "centroid"
     min_object_pixels: int = 16
+    sam_features_root: Path | None = None
 
 
 @dataclass
@@ -128,6 +131,14 @@ class DatasetScannet2dSeg(IterableDataset):
         raise FileNotFoundError(
             f"No camera files found under {self.root} for scenes {self.scenes}"
         )
+
+    @property
+    def use_precomputed_sam_features(self) -> bool:
+        return self.cfg.sam_features_root is not None
+
+    def _sam_feature_path(self, scene: str, frame_id: str) -> Path:
+        assert self.cfg.sam_features_root is not None
+        return Path(self.cfg.sam_features_root) / scene / f"{frame_id}_sam.pt"
 
     def decompose_labels(self, label_map):
         """Label map -> (K, H, W) binary masks for non-background objects."""
@@ -227,8 +238,10 @@ class DatasetScannet2dSeg(IterableDataset):
             intrinsics_list = []
             images_list = []
             sam_images_list: list[torch.Tensor] = []
+            sam_features_list: list[torch.Tensor] = []
             label_list = []
             valid = True
+            use_precomputed = self.use_precomputed_sam_features
 
             for view_index in idxs:
                 frame_id = frame_ids[view_index]
@@ -238,6 +251,16 @@ class DatasetScannet2dSeg(IterableDataset):
                     logger.warning(f"Missing files for {scene} frame {frame_id}")
                     valid = False
                     break
+
+                if use_precomputed:
+                    sam_path = self._sam_feature_path(scene, frame_id)
+                    if not sam_path.is_file():
+                        logger.warning(
+                            f"Missing SAM features for {scene} frame {frame_id}: "
+                            f"{sam_path}"
+                        )
+                        valid = False
+                        break
 
                 rgb = cv2.imread(str(paths.image), cv2.IMREAD_COLOR)
                 if rgb is None:
@@ -256,11 +279,12 @@ class DatasetScannet2dSeg(IterableDataset):
                 rgb_resized = cv2.resize(
                     rgb, (w_target, h_target), interpolation=cv2.INTER_LINEAR
                 )
-                rgb_sam = cv2.resize(
-                    rgb,
-                    (SAM_IMAGE_SIZE, SAM_IMAGE_SIZE),
-                    interpolation=cv2.INTER_LINEAR,
-                )
+                if not use_precomputed:
+                    rgb_sam = cv2.resize(
+                        rgb,
+                        (SAM_IMAGE_SIZE, SAM_IMAGE_SIZE),
+                        interpolation=cv2.INTER_LINEAR,
+                    )
                 label_resized = cv2.resize(
                     label_map, (w_target, h_target), interpolation=cv2.INTER_NEAREST
                 )
@@ -287,7 +311,20 @@ class DatasetScannet2dSeg(IterableDataset):
                 extrinsics_list.append(pose)
                 intrinsics_list.append(intrinsics)
                 images_list.append(self.to_tensor(Image.fromarray(rgb_resized)))
-                sam_images_list.append(self.to_tensor(Image.fromarray(rgb_sam)))
+                if use_precomputed:
+                    sam_feat = torch.load(
+                        self._sam_feature_path(scene, frame_id), map_location="cpu"
+                    )
+                    if sam_feat.shape != (256, 64, 64):
+                        logger.warning(
+                            f"Unexpected SAM feature shape {sam_feat.shape} for "
+                            f"{scene} frame {frame_id}, expected (256, 64, 64)"
+                        )
+                        valid = False
+                        break
+                    sam_features_list.append(sam_feat)
+                else:
+                    sam_images_list.append(self.to_tensor(Image.fromarray(rgb_sam)))
                 label_list.append(
                     torch.from_numpy(label_resized.astype(np.int64))
                 )
@@ -303,7 +340,10 @@ class DatasetScannet2dSeg(IterableDataset):
             )
             images = torch.stack(images_list, dim=0)
             labels = torch.stack(label_list, dim=0)
-            sam_images = torch.stack(sam_images_list, dim=0)
+            if use_precomputed:
+                sam_features = torch.stack(sam_features_list, dim=0)
+            else:
+                sam_images = torch.stack(sam_images_list, dim=0)
 
             num_ctx = self.view_sampler.num_context_views
             context_extrinsics = extrinsics[:num_ctx]
@@ -342,8 +382,12 @@ class DatasetScannet2dSeg(IterableDataset):
                 "far": self.get_bound("far", num_target_views) / scale,
                 "index": torch.tensor(target_frame_ids, dtype=torch.int64),
             }
-            context_views["sam_image"] = sam_images[:num_ctx]
-            target_views["sam_image"] = sam_images[num_ctx:]
+            if use_precomputed:
+                context_views["sam_features"] = sam_features[:num_ctx]
+                target_views["sam_features"] = sam_features[num_ctx:]
+            else:
+                context_views["sam_image"] = sam_images[:num_ctx]
+                target_views["sam_image"] = sam_images[num_ctx:]
 
             yield {
                 "context": context_views,

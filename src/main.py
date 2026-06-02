@@ -45,6 +45,16 @@ def cyan(text: str) -> str:
     return f"{Fore.CYAN}{text}{Fore.RESET}"
 
 
+def uses_precomputed_sam_features(cfg_dict: DictConfig) -> bool:
+    for group in cfg_dict.get("dataset", []):
+        if not isinstance(group, DictConfig):
+            continue
+        for val in group.values():
+            if isinstance(val, DictConfig) and val.get("sam_features_root"):
+                return True
+    return False
+
+
 @hydra.main(
     version_base=None,
     config_path="../config",
@@ -270,8 +280,13 @@ def train(cfg_dict: DictConfig):
             debug_decoder_cfg=debug_decoder_cfg,
         )
     else:
+        skip_sam_encoder = uses_precomputed_sam_features(
+            cfg_dict
+        ) and "sam" in cfg.train.reproj_model
+        if skip_sam_encoder:
+            print(cyan("Using precomputed SAM features; skipping SAM encoder load."))
         vggt, dino, lseg_feature_extractor, clip, sam_encoder, feature_dim = (
-            load_foundation_model(cfg)
+            load_foundation_model(cfg, skip_sam_encoder=skip_sam_encoder)
         )
         cfg.model.encoder.feature_dim = (
             feature_dim if cfg.train.feature_rendering_loss > 0 else 0

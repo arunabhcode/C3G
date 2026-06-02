@@ -17,6 +17,7 @@ hydra:
 dataset:
   scannet_2dseg:
     overfit_to_scene: scene0000_00
+    sam_features_root: null
 
 trainer:
   max_steps: 1

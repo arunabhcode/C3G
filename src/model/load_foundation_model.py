@@ -10,7 +10,7 @@ DINOV3_MODELS = {
 }
 
 
-def load_foundation_model(cfg):
+def load_foundation_model(cfg, *, skip_sam_encoder: bool = False):
     vggt, dino, lseg_feature_extractor, clip_model, sam_encoder = (
         None,
         None,
@@ -74,11 +74,13 @@ def load_foundation_model(cfg):
             param.requires_grad = False
 
     elif "sam" in cfg.train.reproj_model:
-        model_variant = getattr(cfg.train, "sam_model_variant", "sam_vit_h")
-        checkpoint_path = getattr(
-            cfg.train, "sam_checkpoint", "./pretrained_weights/sam_vit_h.pth"
-        )
-        sam_encoder, feature_dim = load_sam_encoder(model_variant, checkpoint_path)
+        feature_dim = 256
+        if not skip_sam_encoder:
+            model_variant = getattr(cfg.train, "sam_model_variant", "sam_vit_h")
+            checkpoint_path = getattr(
+                cfg.train, "sam_checkpoint", "./pretrained_weights/sam_vit_h.pth"
+            )
+            sam_encoder, feature_dim = load_sam_encoder(model_variant, checkpoint_path)
 
     if cfg.train.reproj_model == "maskclip":
         upsampler = torch.hub.load("mhamilton723/FeatUp", "maskclip", use_norm=False)

@@ -18,6 +18,7 @@ class BatchedViews(TypedDict, total=False):
     intrinsics: Float[Tensor, "batch _ 3 3"]  # batch view 3 3
     image: Float[Tensor, "batch _ _ _ _"]  # batch view channel height width
     sam_image: Float[Tensor, "batch _ _ _ _"]  # batch view channel H W (SAM dual-res)
+    sam_features: Float[Tensor, "batch _ _ _ _"]  # batch view 256 64 64 (precomputed)
     near: Float[Tensor, "batch _"]  # batch view
     far: Float[Tensor, "batch _"]  # batch view
     index: Int64[Tensor, "batch _"]  # batch view
@@ -35,6 +36,7 @@ class UnbatchedViews(TypedDict, total=False):
     intrinsics: Float[Tensor, "_ 3 3"]
     image: Float[Tensor, "_ 3 height width"]
     sam_image: Float[Tensor, "_ 3 height width"]
+    sam_features: Float[Tensor, "_ 256 64 64"]
     near: Float[Tensor, " _"]
     far: Float[Tensor, " _"]
     index: Int64[Tensor, " _"]

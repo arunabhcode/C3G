@@ -6,8 +6,9 @@ Prerequisites (once)::
     modal volume put c3g-weights /path/to/gaussian_decoder.ckpt gaussian_decoder.ckpt
     modal volume put c3g-weights /path/to/sam_vit_h.pth sam_vit_h.pth
     # ScanNet frames on ``scannet`` volume.
-    # Distillation only: precomputed ``*_sam.pt`` on ``precompute_sam_features`` at
-    # ``scannet/`` (see modal_precompute_sam_features.py).
+    # Precomputed ``*_sam.pt`` on ``precompute_sam_features`` at ``scannet/`` speed up
+    # distillation (required) and prompted training (optional; see
+    # dataset.scannet_2dseg.sam_features_root).
 
 Training (Hydra ``+training=`` only; pick experiment via CLI)::
 
