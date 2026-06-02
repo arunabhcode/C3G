@@ -96,7 +96,8 @@ class SAMMaskDecoderWrapper(nn.Module):
         point_coords: torch.Tensor | None = None,
         point_labels: torch.Tensor | None = None,
         box: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        return_iou_predictions: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Run mask decoder for one embedding (1, C, 64, 64).
 
         SAM's ``predict_masks`` repeats image embeddings by ``tokens.shape[0]``,
@@ -110,13 +111,15 @@ class SAMMaskDecoderWrapper(nn.Module):
             box=box,
         )
         image_pe = self.prompt_encoder.get_dense_pe()
-        masks, _ = self.mask_decoder(
+        masks, iou_predictions = self.mask_decoder(
             image_embeddings=image_embeddings,
             image_pe=image_pe,
             sparse_prompt_embeddings=sparse_emb,
             dense_prompt_embeddings=dense_emb,
             multimask_output=True,
         )
+        if return_iou_predictions:
+            return masks, iou_predictions
         return masks
 
     def forward(
@@ -125,7 +128,8 @@ class SAMMaskDecoderWrapper(nn.Module):
         point_coords: torch.Tensor | None = None,
         point_labels: torch.Tensor | None = None,
         box: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        return_iou_predictions: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Run the SAM mask decoder on ``rendered_features`` (B, C, H, W).
 
         Without point/box prompts, uses segment-everything grid prompts per image.
@@ -133,7 +137,8 @@ class SAMMaskDecoderWrapper(nn.Module):
         SAM's mask decoder repeats embeddings by the prompt batch dimension.
 
         Returns:
-            Low-res mask logits of shape (B, num_multimasks, mask_h, mask_w).
+            Low-res mask logits (B, num_multimasks, mask_h, mask_w), and optionally
+            SAM IoU head scores (B, num_multimasks) when ``return_iou_predictions``.
         """
         batch_size, _, height, width = rendered_features.shape
         if batch_size == 0:
@@ -155,9 +160,11 @@ class SAMMaskDecoderWrapper(nn.Module):
                 point_coords=point_coords,
                 point_labels=point_labels,
                 box=box,
+                return_iou_predictions=return_iou_predictions,
             )
 
         masks = []
+        ious = []
         for index in range(batch_size):
             sample_coords = (
                 point_coords[index : index + 1] if point_coords is not None else None
@@ -166,12 +173,26 @@ class SAMMaskDecoderWrapper(nn.Module):
                 point_labels[index : index + 1] if point_labels is not None else None
             )
             sample_box = box[index : index + 1] if box is not None else None
-            masks.append(
-                self._forward_single(
+            if return_iou_predictions:
+                sample_masks, sample_ious = self._forward_single(
                     image_embeddings[index : index + 1],
                     point_coords=sample_coords,
                     point_labels=sample_labels,
                     box=sample_box,
+                    return_iou_predictions=True,
                 )
-            )
-        return torch.cat(masks, dim=0)
+                masks.append(sample_masks)
+                ious.append(sample_ious)
+            else:
+                masks.append(
+                    self._forward_single(
+                        image_embeddings[index : index + 1],
+                        point_coords=sample_coords,
+                        point_labels=sample_labels,
+                        box=sample_box,
+                    )
+                )
+        stacked_masks = torch.cat(masks, dim=0)
+        if return_iou_predictions:
+            return stacked_masks, torch.cat(ious, dim=0)
+        return stacked_masks

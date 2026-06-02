@@ -26,7 +26,6 @@ from src.config import load_typed_root_config
 from src.dataset import get_dataset
 from src.dataset.data_module import get_data_shim
 from src.dataset.types import BatchedExample
-from src.evaluation.mask_metrics import best_multimask_scores
 from src.global_cfg import set_cfg
 from src.misc.step_tracker import StepTracker
 from src.modal_infra.modal_common import (
@@ -53,6 +52,50 @@ from src.loss import get_losses
 CoordFrame = Literal["original", "sam"]
 DEFAULT_PROMPT_STRATEGY = "centroid"
 DEFAULT_MIN_OBJECT_PIXELS = 16
+SAM_IMAGE_SIZE = 1024
+
+# Controlled mask-export metadata: vanilla SAM and C3G-SAM should differ only in
+# feature source (RGB encoder vs rendered C3G features), not prompts/upsampling.
+CONTROLLED_EVAL_MANIFEST: dict[str, Any] = {
+    "controlled_eval": True,
+    "prompt_source": "label_centroid_original_pixels",
+    "multimask_selection": "predicted_iou_head",
+    "logit_upsampling": "bilinear_align_corners_false_to_label_size",
+    "threshold": "logits>0",
+}
+
+
+def transform_original_points_to_decoder_frame(
+    point_coords: list[list[float]],
+    original_size: tuple[int, int],
+    *,
+    sam_image_size: int = SAM_IMAGE_SIZE,
+) -> list[list[float]]:
+    """Map original label/image pixel coords to the SAM decoder canvas.
+
+    Uses segment_anything's ``ResizeLongestSide`` so C3G mask-decoder prompts
+    match the geometry vanilla SAM applies inside ``src.model.sam.forward``.
+    """
+    import numpy as np
+    from segment_anything.utils.transforms import ResizeLongestSide
+
+    transform = ResizeLongestSide(sam_image_size)
+    arr = np.asarray(point_coords, dtype=np.float32)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, 2)
+    return transform.apply_coords(arr, original_size).tolist()
+
+
+def transform_original_points_to_sam_canvas(
+    point_coords: list[list[float]],
+    original_size: tuple[int, int],
+    *,
+    sam_image_size: int = SAM_IMAGE_SIZE,
+) -> list[list[float]]:
+    """Backward-compatible alias for ``transform_original_points_to_decoder_frame``."""
+    return transform_original_points_to_decoder_frame(
+        point_coords, original_size, sam_image_size=sam_image_size
+    )
 
 
 @dataclass
@@ -71,6 +114,88 @@ class DatasetExportStats:
 def save_mask_png(mask, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray((mask.astype("uint8") * 255)).save(path)
+
+
+def class_prompts_from_label_original(
+    label_path: Path,
+    *,
+    prompt_strategy: str = DEFAULT_PROMPT_STRATEGY,
+    min_object_pixels: int = DEFAULT_MIN_OBJECT_PIXELS,
+    include_gt_masks: bool = False,
+) -> list[tuple[int, list[list[float]], list[int]]] | list[
+    tuple[int, list[list[float]], list[int], torch.Tensor]
+]:
+    """Per-class prompts in original label/image pixel coordinates (shared eval entry)."""
+    return class_prompts_from_label(
+        label_path,
+        coord_frame="original",
+        prompt_strategy=prompt_strategy,
+        min_object_pixels=min_object_pixels,
+        include_gt_masks=include_gt_masks,
+    )
+
+
+def transform_class_prompts_for_c3g_decoder(
+    class_prompts: list[tuple[Any, ...]],
+    label_shape: tuple[int, int],
+    *,
+    sam_image_size: int = SAM_IMAGE_SIZE,
+) -> list[tuple[Any, ...]]:
+    """Transform original-pixel prompts to SAM canvas coords for the mask decoder."""
+    transformed: list[tuple[Any, ...]] = []
+    for item in class_prompts:
+        class_id, coords, labels = item[0], item[1], item[2]
+        decoder_coords = transform_original_points_to_decoder_frame(
+            coords,
+            label_shape,
+            sam_image_size=sam_image_size,
+        )
+        if len(item) > 3:
+            transformed.append((class_id, decoder_coords, labels, item[3]))
+        else:
+            transformed.append((class_id, decoder_coords, labels))
+    return transformed
+
+
+def select_best_multimask_index(iou_predictions: torch.Tensor) -> int:
+    """Pick multimask index via SAM's predicted IoU head (no GT IoU)."""
+    return int(iou_predictions.argmax().detach().cpu().item())
+
+
+def upsample_logits_to_label_mask(
+    logits: torch.Tensor,
+    label_size: tuple[int, int],
+):
+    """Upsample decoder logits to label resolution and threshold at zero."""
+    import numpy as np
+
+    tensor = logits.detach().cpu().float()
+    if tensor.dim() == 2:
+        tensor = tensor.unsqueeze(0).unsqueeze(0)
+    elif tensor.dim() == 3:
+        tensor = tensor.unsqueeze(0)
+    upsampled = F.interpolate(
+        tensor,
+        size=label_size,
+        mode="bilinear",
+        align_corners=False,
+    ).squeeze(0).squeeze(0)
+    return (upsampled > 0.0).numpy()
+
+
+def save_controlled_eval_mask(
+    low_res_logits: torch.Tensor,
+    iou_predictions: torch.Tensor,
+    label_size: tuple[int, int],
+    path: Path,
+) -> None:
+    """Select multimask via IoU head, upsample logits, assert label resolution."""
+    best_idx = select_best_multimask_index(iou_predictions)
+    mask = upsample_logits_to_label_mask(low_res_logits[best_idx], label_size)
+    assert mask.shape == label_size, (
+        f"mask shape {mask.shape} != label shape {label_size}"
+    )
+    save_mask_png(mask, path)
 
 
 def class_prompts_from_label(
@@ -116,12 +241,11 @@ def class_prompts_from_label(
         if coord_frame == "original":
             coords = [[float(col), float(row)]]
         else:
-            if image_shape is None:
-                raise ValueError("image_shape is required when coord_frame='sam'")
-            h, w = image_shape
-            x = col * (sampler.image_size / w)
-            y = row * (sampler.image_size / h)
-            coords = [[float(x), float(y)]]
+            coords = transform_original_points_to_decoder_frame(
+                [[float(col), float(row)]],
+                (h_label, w_label),
+                sam_image_size=SAM_IMAGE_SIZE,
+            )
 
         entry: tuple = (class_id, coords, [1])
         if include_gt_masks:
@@ -183,6 +307,25 @@ def encode_mask_array(masks) -> dict[str, Any]:
     }
 
 
+def encode_float_array(array) -> dict[str, Any]:
+    import numpy as np
+
+    packed = np.asarray(array, dtype=np.float32)
+    return {
+        "data_b64": base64.b64encode(packed.tobytes()).decode("ascii"),
+        "shape": list(packed.shape),
+        "dtype": "float32",
+    }
+
+
+def decode_float_array(payload: dict[str, Any]):
+    import numpy as np
+
+    shape = tuple(payload["shape"])
+    raw = base64.b64decode(payload["data_b64"])
+    return np.frombuffer(raw, dtype=np.float32).reshape(shape)
+
+
 def run_vanilla_sam_predict(
     sam,
     device: torch.device,
@@ -228,11 +371,15 @@ def run_vanilla_sam_predict(
     response: dict[str, Any] = {
         "masks": encode_mask_array(masks),
         "iou_predictions": result["iou_predictions"].detach().cpu().tolist(),
+        "low_res_logits": encode_float_array(
+            result["low_res_logits"].detach().cpu().numpy()
+        ),
     }
-    if "low_res_logits" in result:
-        low_res = result["low_res_logits"].detach().cpu().numpy()
-        response["low_res_logits"] = encode_mask_array(low_res.astype(np.float32))
     return response
+
+
+def low_res_logits_from_predict_response(result: dict[str, Any]):
+    return decode_float_array(result["low_res_logits"])
 
 
 def masks_from_predict_response(masks_payload: dict[str, Any]):
@@ -408,6 +555,7 @@ def export_vanilla_sam_masks(
         "saved_masks": total_saved,
         "skipped_frames": total_skipped_frames,
         "skipped_existing_frames": total_skipped_existing,
+        **CONTROLLED_EVAL_MANIFEST,
     }
     write_export_manifest(output_root, manifest)
     print(
@@ -428,10 +576,12 @@ def _export_vanilla_sam_frames(
     min_object_pixels: int,
     batch_size: int,
 ) -> tuple[int, int, int]:
+    import numpy as np
+
     saved_masks = 0
     skipped_frames = 0
     skipped_existing = 0
-    batch_items: list[tuple[str, str, int, bytes]] = []
+    batch_items: list[tuple[str, str, int, bytes, Path]] = []
     batch_prompts: list[tuple[list[list[float]], list[int]]] = []
 
     def flush() -> None:
@@ -441,16 +591,26 @@ def _export_vanilla_sam_frames(
         payload = build_vanilla_batch_predict_payload(
             [
                 (image_bytes, coords, labels)
-                for (_, _, _, image_bytes), (coords, labels) in zip(
+                for (_, _, _, image_bytes, _), (coords, labels) in zip(
                     batch_items, batch_prompts
                 )
             ],
             from_paths=False,
         )
         result = run_vanilla_sam_predict(sam, device, payload)
-        masks = best_masks_from_predict_response(result)
-        for (scene_id, frame_id, class_id, _), mask in zip(batch_items, masks):
-            save_mask_png(mask, pred_root / scene_id / frame_id / f"{class_id}.png")
+        low_res_logits = low_res_logits_from_predict_response(result)
+        iou_predictions = torch.tensor(result["iou_predictions"])
+        for index, (scene_id, frame_id, class_id, _, label_path) in enumerate(
+            batch_items
+        ):
+            label_np = np.array(Image.open(label_path))
+            label_size = tuple(label_np.shape[:2])
+            save_controlled_eval_mask(
+                torch.from_numpy(low_res_logits[index]),
+                iou_predictions[index],
+                label_size,
+                pred_root / scene_id / frame_id / f"{class_id}.png",
+            )
             saved_masks += 1
         batch_items.clear()
         batch_prompts.clear()
@@ -471,9 +631,8 @@ def _export_vanilla_sam_frames(
             continue
 
         try:
-            class_prompts = class_prompts_from_label(
+            class_prompts = class_prompts_from_label_original(
                 paths.label,
-                coord_frame="original",
                 prompt_strategy=prompt_strategy,
                 min_object_pixels=min_object_pixels,
             )
@@ -488,7 +647,9 @@ def _export_vanilla_sam_frames(
 
         image_bytes = paths.image.read_bytes()
         for class_id, coords, labels in class_prompts:
-            batch_items.append((scene_id, paths.frame_id, class_id, image_bytes))
+            batch_items.append(
+                (scene_id, paths.frame_id, class_id, image_bytes, paths.label)
+            )
             batch_prompts.append((coords, labels))
             if len(batch_items) >= batch_size:
                 flush()
@@ -596,28 +757,25 @@ def _flush_c3g_mask_batch(
         device=device,
     )
 
-    pred_masks = mask_decoder(
+    pred_masks, iou_predictions = mask_decoder(
         features,
         point_coords=point_coords,
         point_labels=point_labels,
+        return_iou_predictions=True,
     )
 
     saved = 0
     for index, (scene_id, frame_id, class_id, gt_mask) in enumerate(batch_items):
-        pred = pred_masks[index].detach().cpu()
         gt = gt_mask.detach().cpu()
         if gt.dim() == 3:
             gt = gt.squeeze(0)
-        gt_size = tuple(gt.shape[-2:])
-        pred_full = F.interpolate(
-            pred.unsqueeze(0).float(),
-            size=gt_size,
-            mode="bilinear",
-            align_corners=False,
-        ).squeeze(0)
-        best = best_multimask_scores(pred_full, gt.numpy())
-        mask = (torch.sigmoid(pred_full[best.best_index]) > 0.0).numpy()
-        save_mask_png(mask, pred_root / scene_id / frame_id / f"{class_id}.png")
+        label_size = tuple(gt.shape[-2:])
+        save_controlled_eval_mask(
+            pred_masks[index].detach().cpu(),
+            iou_predictions[index].detach().cpu(),
+            label_size,
+            pred_root / scene_id / frame_id / f"{class_id}.png",
+        )
         saved += 1
     return saved
 
@@ -636,6 +794,7 @@ def export_c3g_sam_masks(
     limit_frames: int | None = None,
 ) -> dict[str, Any]:
     """Export C3G-rendered SAM masks for Replica + ScanNet test."""
+    import numpy as np
     from src.dataset.scannet_2dseg_splits import scenes_for_stage
 
     data_shim = get_data_shim(wrapper.encoder)
@@ -702,7 +861,7 @@ def export_c3g_sam_masks(
         if limit_frames is not None:
             frames = frames[: int(limit_frames)]
 
-        image_shape = tuple(distill_cfg.input_image_shape)
+        # image_shape = tuple(distill_cfg.input_image_shape)
         print(
             f"[c3g/{dataset_name}] {len(scenes_to_run)} scenes, {len(frames)} frames",
             flush=True,
@@ -731,10 +890,8 @@ def export_c3g_sam_masks(
                 continue
 
             try:
-                class_prompts = class_prompts_from_label(
+                class_prompts = class_prompts_from_label_original(
                     paths.label,
-                    coord_frame="sam",
-                    image_shape=image_shape,
                     prompt_strategy=prompt_strategy,
                     min_object_pixels=min_object_pixels,
                     include_gt_masks=True,
@@ -750,6 +907,11 @@ def export_c3g_sam_masks(
             if not class_prompts:
                 skipped_frames += 1
                 continue
+
+            label_shape = tuple(np.array(Image.open(paths.label)).shape[:2])
+            class_prompts = transform_class_prompts_for_c3g_decoder(
+                class_prompts, label_shape
+            )
 
             example = distill_dataset._build_visualization_batch(
                 scene_id, paths.frame_id
@@ -816,6 +978,7 @@ def export_c3g_sam_masks(
         "saved_masks": total_saved,
         "skipped_frames": total_skipped,
         "skipped_existing_frames": total_skipped_existing,
+        **CONTROLLED_EVAL_MANIFEST,
     }
     write_export_manifest(output_root, manifest)
     print(f"C3G mask export complete — {total_saved} masks under {output_root}")
