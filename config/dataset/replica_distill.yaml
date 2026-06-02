@@ -12,7 +12,7 @@ make_baseline_1: true
 augment: true
 
 # VGGT patch embed requires H,W divisible by 14 (252 = 18 * 14).
-input_image_shape: [252, 252]
+input_image_shape: [224, 224]
 original_image_shape: [680, 1200]
 cameras_are_circular: false
 

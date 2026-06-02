@@ -168,8 +168,8 @@ modal run src/modal_infra/modal_train_c3gsam.py::smoke --experiment prompted --w
 **Vanilla SAM eval** (GT point prompts; no Hydra):
 
 ```bash
-modal run src/modal_infra/modal_eval_sam.py::smoke --dataset replica --wait
-modal run src/modal_infra/modal_eval_sam.py --wait
+modal run src/modal_infra/modal_eval_masks.py::vanilla_smoke --dataset replica --wait
+modal run src/modal_infra/modal_eval_masks.py::vanilla --wait
 ```
 
 Shared volume paths live in `src/modal_infra/modal_common.py`.

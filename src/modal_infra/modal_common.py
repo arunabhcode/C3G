@@ -361,7 +361,7 @@ def build_eval_sam_modal_image(
     src_root: Path | None = None,
     remote_root: Path = VANILLA_SAM_MODAL_ROOT,
 ):
-    """Lightweight image for ``modal_eval_sam`` (``uv pip install``)."""
+    """Lightweight image for ``modal_eval_masks`` vanilla SAM (``uv pip install``)."""
     import modal
 
     # Resolve from this file so local dev and vanilla Modal workers (/root/src) both work
