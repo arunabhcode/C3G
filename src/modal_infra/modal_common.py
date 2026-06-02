@@ -40,6 +40,7 @@ VANILLA_EVAL_DATASETS: list[tuple[DatasetName, list[str]]] = [
 WEIGHTS_VOLUME = "c3g-weights"
 OUTPUT_VOLUME = "c3g-train-outputs"
 VANILLA_SAM_OUTPUT_VOLUME = "vanilla-sam-outputs"
+C3G_SAM_EVAL_OUTPUT_VOLUME = "c3g-sam-eval-outputs"
 PRECOMPUTE_SAM_FEATURES_VOLUME = "precompute_sam_features"
 REPLICA_VOLUME = "replica"
 SCANNET_VOLUME = "scannet"
@@ -49,6 +50,7 @@ REPLICA_MOUNT = Path("/replica")
 SCANNET_MOUNT = Path("/scannet")
 OUTPUT_MOUNT = Path("/outputs")
 VANILLA_SAM_OUTPUT_MOUNT = Path("/vanilla-sam-outputs")
+C3G_SAM_EVAL_OUTPUT_MOUNT = Path("/c3g-sam-eval-outputs")
 PRECOMPUTE_SAM_FEATURES_MOUNT = Path("/precompute_sam_features")
 
 DEFAULT_SAM_CHECKPOINT = WEIGHTS_MOUNT / "sam_vit_h.pth"

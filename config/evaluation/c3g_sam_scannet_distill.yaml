@@ -25,6 +25,9 @@ dataset:
     roots: [/scannet]
     sam_features_root: /precompute_sam_features/scannet
     augment: false
+    # Mask export only uses target view 0; avoid loading/rendering neighbors.
+    view_sampler:
+      num_target_views: 1
 
 data_loader:
   test:
@@ -46,5 +49,12 @@ trainer:
   limit_test_batches: null
 
 eval:
+  # Mask export (modal_eval_c3gsam → eval_c3g_sam_scannet_masks)
+  mask_output_dir: /c3g-sam-eval-outputs
+  mask_batch_size: 32
+  prompt_strategy: centroid
+  min_object_pixels: 16
+  limit_frames: null
+  # Optional Lightning test + W&B debug (pass --with-lightning-test on Modal)
   visualization_count: 5
   visualization_seed: 42
