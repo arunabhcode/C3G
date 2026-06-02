@@ -60,10 +60,6 @@ optimizer:
   weight_decay: 0.05
   feature_head_weight_decay: 0.01
 
-data_loader:
-  train:
-    batch_size: 36
-
 train:
   context_view_loss: true
   prompt_mode: prompted
@@ -86,8 +82,12 @@ trainer:
   num_sanity_val_steps: 0
 
 checkpointing:
-  every_n_train_steps: 50
-  save_top_k: 20
+  # Save best checkpoints from validation loss only (no step-based or IoU saves).
+  monitor: val/loss
+  mode: min
+  save_top_k: 5
+  save_weights_only: false
+  debug_log_interval: 50
 
 debug_decoder:
   enabled: true

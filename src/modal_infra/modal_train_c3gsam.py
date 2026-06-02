@@ -21,6 +21,8 @@ Smoke (one optimizer step)::
     modal run src/modal_infra/modal_train_c3gsam.py::smoke --experiment prompted --wait
 
 Checkpoints: ``c3g-train-outputs`` volume at ``/outputs/runs/<wandb.name>/``.
+Prompted training saves checkpoints from ``val/loss`` (see
+``feature_head_sam_prompted_scannet`` checkpointing config), not IoU or train step.
 """
 
 from __future__ import annotations
@@ -97,8 +99,10 @@ def resolve_training_config(
 
 @app.function(
     image=build_c3g_modal_image(),
-    gpu="B200",
+    gpu="H200",
+    cpu=8,
     timeout=60 * 60 * 24,
+    memory=131072, #128 GB RAM
     secrets=[WANDB_SECRET],
     volumes=VOLUMES,
 )

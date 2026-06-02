@@ -297,7 +297,10 @@ class DistillationModelWrapper(LightningModule):
         if self.step_tracker is not None:
             self.step_tracker.set_step(self.global_step)
 
-        checkpoint_interval = get_cfg()["checkpointing"]["every_n_train_steps"]
+        ckpt_cfg = get_cfg()["checkpointing"]
+        checkpoint_interval = ckpt_cfg.get(
+            "debug_log_interval", ckpt_cfg.get("every_n_train_steps", 50)
+        )
         should_log_train_debug = (
             self.global_rank == 0
             and self.global_step % checkpoint_interval == 0
@@ -406,10 +409,14 @@ class DistillationModelWrapper(LightningModule):
         self.log("val/feature_cosine", val_cosine, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
 
         if self.global_rank == 0 and self._should_log_debug_visualizations():
+            ckpt_cfg = get_cfg()["checkpointing"]
+            debug_interval = ckpt_cfg.get(
+                "debug_log_interval", ckpt_cfg.get("every_n_train_steps", 50)
+            )
             log_debug_visualizations(
                 self.logger,
                 self.global_step,
-                get_cfg()["checkpointing"]["every_n_train_steps"],
+                debug_interval,
                 batch["target"]["image"][0, 0],
                 target_sam[0, 0],
                 rendered_interp[0, 0],
@@ -422,7 +429,7 @@ class DistillationModelWrapper(LightningModule):
             log_decoder_debug(
                 self.logger,
                 self.global_step,
-                get_cfg()["checkpointing"]["every_n_train_steps"],
+                debug_interval,
                 self.sam_debug_decoder,
                 target_sam[0, 0].detach().float(),
                 rendered_interp[0, 0].detach().float(),

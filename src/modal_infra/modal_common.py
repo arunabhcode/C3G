@@ -222,7 +222,7 @@ MODAL_UV_PATH = "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
 
 # Match distillation_sanity_check.sh / pyproject.toml (torch cu128, Blackwell sm_120).
 C3G_CUDA_IMAGE = "nvidia/cuda:12.8.0-devel-ubuntu24.04"
-C3G_TORCH_CUDA_ARCH_LIST = "10.0"
+C3G_TORCH_CUDA_ARCH_LIST = "9.0"
 
 def build_eval_sam_modal_image(
     *,

@@ -93,17 +93,30 @@ def train(cfg_dict: DictConfig):
         logger = LocalLogger()
 
     # Set up checkpointing.
-    callbacks.append(
-        ModelCheckpoint(
-            output_dir / "checkpoints",
-            every_n_train_steps=cfg.checkpointing.every_n_train_steps,
-            save_top_k=cfg.checkpointing.save_top_k,
-            save_weights_only=cfg.checkpointing.save_weights_only,
-            monitor="info/global_step",
-            mode="max",
+    checkpoint_kwargs: dict = {
+        "dirpath": output_dir / "checkpoints",
+        "save_top_k": cfg.checkpointing.save_top_k,
+        "save_weights_only": cfg.checkpointing.save_weights_only,
+        "monitor": cfg.checkpointing.monitor,
+        "mode": cfg.checkpointing.mode,
+        "save_last": True,
+    }
+    if cfg.checkpointing.every_n_train_steps is not None:
+        checkpoint_kwargs["every_n_train_steps"] = cfg.checkpointing.every_n_train_steps
+    checkpoint_callback = ModelCheckpoint(**checkpoint_kwargs)
+    checkpoint_callback.CHECKPOINT_EQUALS_CHAR = "_"
+    callbacks.append(checkpoint_callback)
+    print(
+        cyan(
+            f"Checkpoints: monitor={cfg.checkpointing.monitor!r} "
+            f"mode={cfg.checkpointing.mode!r}"
+            + (
+                f" every_n_train_steps={cfg.checkpointing.every_n_train_steps}"
+                if cfg.checkpointing.every_n_train_steps is not None
+                else " (validation-triggered saves only)"
+            )
         )
     )
-    callbacks[-1].CHECKPOINT_EQUALS_CHAR = "_"
 
     # Prepare the checkpoint for loading.
     checkpoint_path = update_checkpoint_path(cfg.checkpointing.load, cfg.wandb)

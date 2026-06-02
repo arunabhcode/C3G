@@ -54,7 +54,7 @@ from ..visualization.camera_trajectory.wobble import (
 from src.model.clip import clip
 from ..visualization.layout import add_border, hcat, vcat
 from ..visualization.validation_in_3d import render_cameras, render_projections
-from .decoder.decoder import Decoder, DepthRenderingMode
+from .decoder.decoder import Decoder, DecoderOutput, DepthRenderingMode
 from .encoder import Encoder
 from .encoder.visualization.encoder_visualizer import EncoderVisualizer
 from .types import Gaussians
@@ -353,6 +353,111 @@ class ModelWrapper(LightningModule):
         feature = self._sam_merged_features(batch, h, w, interpolate=False)
         return reorder_context_target(feature, num_ctx)
 
+    def _debug_log_interval(self) -> int:
+        ckpt = get_cfg().get("checkpointing", {})
+        return int(
+            ckpt.get(
+                "debug_log_interval",
+                ckpt.get("every_n_train_steps", 50),
+            )
+        )
+
+    def _gaussians_for_prompted_loss(self, gaussians: Gaussians) -> Gaussians:
+        if self.train_cfg.prompt_mode != "prompted":
+            return gaussians
+        return Gaussians(
+            means=gaussians.means.detach(),
+            covariances=gaussians.covariances.detach(),
+            harmonics=gaussians.harmonics.detach(),
+            opacities=gaussians.opacities.detach(),
+            feature=gaussians.feature,
+        )
+
+    def _decoder_output_all_train_views(
+        self, gaussians: Gaussians, batch: BatchedExample, h: int, w: int
+    ):
+        return self.decoder.forward(
+            gaussians,
+            torch.cat(
+                [batch["target"]["extrinsics"], batch["context"]["extrinsics"]], dim=1
+            ),
+            torch.cat(
+                [batch["target"]["intrinsics"], batch["context"]["intrinsics"]], dim=1
+            ),
+            torch.cat([batch["target"]["near"], batch["context"]["near"]], dim=1),
+            torch.cat([batch["target"]["far"], batch["context"]["far"]], dim=1),
+            (h, w),
+            depth_mode=self.train_cfg.depth_mode,
+            global_step=self.global_step,
+        )
+
+    def _compute_prompted_losses(
+        self,
+        output: DecoderOutput,
+        batch: BatchedExample,
+        gaussians: Gaussians,
+        h: int,
+        w: int,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Training-aligned feature + prompted losses (for train/val logging)."""
+        total_loss = torch.tensor(0.0, device=self.device)
+        parts: dict[str, Tensor] = {}
+
+        for loss_fn in self.losses:
+            loss = loss_fn.forward(
+                output,
+                batch,
+                gaussians,
+                self.global_step,
+                target_image=torch.cat(
+                    [batch["target"]["image"], ((batch["context"]["image"] + 1) / 2)],
+                    dim=1,
+                ),
+            )
+            parts[loss_fn.name] = loss
+            total_loss = total_loss + loss
+
+        if self.train_cfg.feature_rendering_loss > 0 and output.feature is not None:
+            feature = self._sam_features_for_loss(batch)
+            gaussian_feature = output.feature
+            b, n_views, _, fh, fw = gaussian_feature.shape
+
+            gaussian_feature = F.interpolate(
+                gaussian_feature.reshape(b * n_views, -1, h, w),
+                size=(fh, fw),
+                mode="bilinear",
+                align_corners=False,
+            ).reshape(b, n_views, -1, fh, fw)
+
+            gaussian_feature = F.normalize(gaussian_feature, p=2, dim=2)
+            feature = F.normalize(feature, p=2, dim=2)
+
+            feature_rendering_loss = (
+                1 - F.cosine_similarity(gaussian_feature, feature.detach(), dim=2)
+            ).mean()
+            weighted = self.train_cfg.feature_rendering_loss * feature_rendering_loss
+            parts["feature_rendering_loss"] = feature_rendering_loss
+            total_loss = total_loss + weighted
+
+        if (
+            self.train_cfg.prompt_mode == "prompted"
+            and self.prompted_segmentation_loss is not None
+            and output.feature is not None
+            and batch["target"].get("label") is not None
+        ):
+            prompted_loss = self.prompted_segmentation_loss.forward(
+                output,
+                batch,
+                gaussians,
+                self.global_step,
+            )
+            parts["prompted_segmentation"] = prompted_loss
+            if prompted_loss.item() > 0:
+                total_loss = total_loss + prompted_loss
+
+        parts["total"] = total_loss
+        return total_loss, parts
+
     def _sam_target_features_64(self, batch: BatchedExample) -> Tensor | None:
         precomputed = batch["target"].get("sam_features")
         if precomputed is not None:
@@ -400,12 +505,12 @@ class ModelWrapper(LightningModule):
         ).squeeze(0)
 
         valid_h, valid_w = target_sam.shape[-2], target_sam.shape[-1]
-        checkpoint_interval = get_cfg()["checkpointing"]["every_n_train_steps"]
+        debug_interval = self._debug_log_interval()
 
         log_debug_visualizations(
             self.logger,
             self.global_step,
-            checkpoint_interval,
+            debug_interval,
             batch["target"]["image"][0, 0].detach().float(),
             target_sam,
             rendered_interp,
@@ -419,7 +524,7 @@ class ModelWrapper(LightningModule):
         log_decoder_debug(
             self.logger,
             self.global_step,
-            checkpoint_interval,
+            debug_interval,
             sam_decoder,
             target_sam,
             rendered_interp,
@@ -852,10 +957,10 @@ class ModelWrapper(LightningModule):
             logger=True,
         )
 
-        checkpoint_interval = get_cfg()["checkpointing"]["every_n_train_steps"]
+        debug_interval = self._debug_log_interval()
         should_log_train_debug = (
             self.global_rank == 0
-            and self.global_step % checkpoint_interval == 0
+            and self.global_step % debug_interval == 0
             and self._last_train_debug_step_logged != self.global_step
         )
         if should_log_train_debug and self._should_log_debug_visualizations():
@@ -1629,6 +1734,7 @@ class ModelWrapper(LightningModule):
             visualization_dump=visualization_dump,
             context_feature=context_feature,
         )
+        gaussians = self._gaussians_for_prompted_loss(gaussians)
 
         output = self.decoder.forward(
             gaussians,
@@ -1656,12 +1762,50 @@ class ModelWrapper(LightningModule):
         self.log(f"val/lpips", lpips)
         self.log(f"val/ssim", ssim)
 
+        if self.train_cfg.prompt_mode == "prompted":
+            loss_output = self.clamp_rendered_features(
+                self._decoder_output_all_train_views(gaussians, batch, h, w)
+            )
+            val_total, val_parts = self._compute_prompted_losses(
+                loss_output, batch, gaussians, h, w
+            )
+            log_kwargs = dict(
+                on_step=False,
+                on_epoch=True,
+                logger=True,
+                sync_dist=True,
+            )
+            self.log(
+                "val/loss",
+                val_total,
+                prog_bar=True,
+                **log_kwargs,
+            )
+            if "feature_rendering_loss" in val_parts:
+                self.log(
+                    "val/feature_rendering_loss",
+                    val_parts["feature_rendering_loss"],
+                    **log_kwargs,
+                )
+            if "prompted_segmentation" in val_parts:
+                self.log(
+                    "val/prompted_segmentation",
+                    val_parts["prompted_segmentation"],
+                    **log_kwargs,
+                )
+
         gt_masks = batch["target"].get("masks")
         if gt_masks is None and batch["target"].get("label") is not None:
             label_maps = batch["target"]["label"]
             gt_masks = (label_maps > 0).float()
             if gt_masks.dim() == 3:
                 gt_masks = gt_masks.unsqueeze(1)
+        metric_log_kwargs = dict(
+            on_step=False,
+            on_epoch=True,
+            logger=True,
+            sync_dist=True,
+        )
         if (
             self.prompted_segmentation_loss is not None
             and output.feature is not None
@@ -1671,18 +1815,13 @@ class ModelWrapper(LightningModule):
             self.log(
                 "val/sam_miou",
                 sam_metrics["iou"],
-                on_step=False,
-                on_epoch=True,
                 prog_bar=True,
-                logger=True,
+                **metric_log_kwargs,
             )
             self.log(
                 "val/sam_boundary_miou",
                 sam_metrics["boundary_iou"],
-                on_step=False,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
+                **metric_log_kwargs,
             )
 
         if self.prompted_segmentation_loss is not None and output.feature is not None:
@@ -1691,24 +1830,17 @@ class ModelWrapper(LightningModule):
                 self.log(
                     "val/multiview_iou",
                     mv_metrics["multiview_iou"],
-                    on_step=False,
-                    on_epoch=True,
-                    prog_bar=True,
-                    logger=True,
+                    **metric_log_kwargs,
                 )
                 self.log(
                     "val/multiview_iou_a_to_b",
                     mv_metrics["multiview_iou_a_to_b"],
-                    on_step=False,
-                    on_epoch=True,
-                    logger=True,
+                    **metric_log_kwargs,
                 )
                 self.log(
                     "val/multiview_iou_b_to_a",
                     mv_metrics["multiview_iou_b_to_a"],
-                    on_step=False,
-                    on_epoch=True,
-                    logger=True,
+                    **metric_log_kwargs,
                 )
 
         if self.global_rank == 0:
