@@ -372,7 +372,7 @@ def build_eval_sam_modal_image(
         .run_commands(
             f"uv pip install --system --python {VANILLA_SAM_PYTHON} "
             "numpy==1.26.4 pillow==11.0.0 opencv-python-headless==4.10.0.84 "
-            "fastapi==0.118.0 pydantic==2.11.4",
+            "fastapi==0.118.0 pydantic==2.11.4 tqdm==4.67.1",
             f"uv pip install --system --python {VANILLA_SAM_PYTHON} "
             f"torch==2.5.1 torchvision==0.20.1 --index-url {PYTORCH_CU124_INDEX}",
             f"uv pip install --system --python {VANILLA_SAM_PYTHON} "

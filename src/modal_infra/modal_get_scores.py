@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """Modal runner to score exported SAM / C3G-SAM masks against GT test labels.
 
-Reads predictions from ``vanilla-sam-outputs`` (``sam``) or ``c3g-sam-eval-outputs``
-(``c3gsam``) and compares them to Replica + ScanNet **test** labels:
+Reads predictions from ``vanilla-sam-outputs`` (``sam``), ``c3g-sam-eval-outputs``
+(``c3gsam``), or ``c3g-sam-dft-eval-outputs`` (``c3gsam-dft``) and compares them
+to Replica + ScanNet **test** labels:
 
 - **IoU** (dense pred vs GT label map; mean over classes present in both)
 - **boundary mIoU** (same shared-class set, boundary IoU per class)
 - **warp mIoU** (dense pred maps warped across adjacent frames; classes present in both frames only; uses `{frame_id}_depth.png`)
 
+Writes ``scores.json`` (dataset-level aggregates) and ``scores_by_scene.csv`` (one row per scene).
+
 Examples::
 
     modal run src/modal_infra/modal_get_scores.py --experiment sam --wait
     modal run src/modal_infra/modal_get_scores.py --experiment c3gsam --wait
+    modal run src/modal_infra/modal_get_scores.py::c3gsam-dft --wait
     modal run src/modal_infra/modal_get_scores.py::smoke --experiment sam --wait
 """
 
 from __future__ import annotations
 
+import csv
 import json
 import sys
 from concurrent.futures import ProcessPoolExecutor
@@ -47,8 +52,26 @@ from src.modal_infra.modal_common import (
 APP_NAME = "c3g-get-scores"
 DEFAULT_MIN_OBJECT_PIXELS = 16
 DEFAULT_DILATION_RATIO = 0.02
-DEFAULT_NUM_WORKERS = 32
+DEFAULT_NUM_WORKERS = 8
 SCORES_FILENAME = "scores.json"
+SCENES_CSV_FILENAME = "scores_by_scene.csv"
+
+SCENE_CSV_FIELDS = [
+    "experiment",
+    "dataset",
+    "split",
+    "scene_id",
+    "num_frames",
+    "iou",
+    "boundary_iou",
+    "warp_iou",
+    "num_scored_classes",
+    "num_warp_pairs",
+    "missing_predictions",
+    "skipped_warp_pairs",
+]
+
+
 def _score_gt_frame_task(args: tuple) -> tuple[list[float], list[float], int]:
     import numpy as np
     from PIL import Image
@@ -186,7 +209,10 @@ def _score_warp_pair_task(args: tuple) -> tuple[float | None, int]:
         return None, 1
     return float(np.mean(pair_scores)), 0
 
-ExperimentName = Literal["sam", "c3gsam"]
+C3G_SAM_DFT_EVAL_OUTPUT_VOLUME = "c3g-sam-dft-eval-outputs"
+C3G_SAM_DFT_EVAL_OUTPUT_MOUNT = Path("/c3g-sam-dft-eval-outputs")
+
+ExperimentName = Literal["sam", "c3gsam", "c3gsam-dft"]
 DatasetName = Literal["replica", "scannet"]
 
 TEST_SCENES: dict[DatasetName, list[str]] = {
@@ -197,6 +223,7 @@ TEST_SCENES: dict[DatasetName, list[str]] = {
 EXPERIMENT_PRED_ROOTS: dict[ExperimentName, Path] = {
     "sam": VANILLA_SAM_OUTPUT_MOUNT,
     "c3gsam": C3G_SAM_EVAL_OUTPUT_MOUNT,
+    "c3gsam-dft": C3G_SAM_DFT_EVAL_OUTPUT_MOUNT,
 }
 
 app = modal.App(APP_NAME)
@@ -209,6 +236,9 @@ vanilla_output_volume = modal.Volume.from_name(
 c3g_eval_output_volume = modal.Volume.from_name(
     C3G_SAM_EVAL_OUTPUT_VOLUME, create_if_missing=True
 )
+c3g_dft_eval_output_volume = modal.Volume.from_name(
+    C3G_SAM_DFT_EVAL_OUTPUT_VOLUME, create_if_missing=True
+)
 
 scores_image = build_eval_sam_modal_image()
 
@@ -217,6 +247,7 @@ SCORE_VOLUMES = {
     str(SCANNET_MOUNT): scannet_volume,
     str(VANILLA_SAM_OUTPUT_MOUNT): vanilla_output_volume,
     str(C3G_SAM_EVAL_OUTPUT_MOUNT): c3g_eval_output_volume,
+    str(C3G_SAM_DFT_EVAL_OUTPUT_MOUNT): c3g_dft_eval_output_volume,
 }
 
 
@@ -231,11 +262,58 @@ class DatasetScores:
     skipped_warp_pairs: int
 
 
+@dataclass
+class SceneScores:
+    dataset: str
+    scene_id: str
+    num_frames: int
+    iou: float
+    boundary_iou: float
+    warp_iou: float | None
+    num_scored_classes: int
+    num_warp_pairs: int
+    missing_predictions: int
+    skipped_warp_pairs: int
+
+
+def _mean_or_zero(values: list[float]) -> float:
+    import numpy as np
+
+    return float(np.mean(values)) if values else 0.0
+
+
+def _scene_scores_from_parts(
+    *,
+    dataset: str,
+    scene_id: str,
+    num_frames: int,
+    ious: list[float],
+    boundary_ious: list[float],
+    warp_ious: list[float],
+    missing_predictions: int,
+    skipped_warp_pairs: int,
+) -> SceneScores:
+    warp_mean = _mean_or_zero(warp_ious) if warp_ious else None
+    return SceneScores(
+        dataset=dataset,
+        scene_id=scene_id,
+        num_frames=num_frames,
+        iou=_mean_or_zero(ious),
+        boundary_iou=_mean_or_zero(boundary_ious),
+        warp_iou=warp_mean,
+        num_scored_classes=len(ious),
+        num_warp_pairs=len(warp_ious),
+        missing_predictions=missing_predictions,
+        skipped_warp_pairs=skipped_warp_pairs,
+    )
+
+
 def _resolve_experiment(experiment: str) -> ExperimentName:
     normalized = experiment.strip().lower()
     if normalized not in EXPERIMENT_PRED_ROOTS:
         raise ValueError(
-            f"Unknown experiment {experiment!r}; expected 'sam' or 'c3gsam'."
+            f"Unknown experiment {experiment!r}; expected "
+            f"'sam', 'c3gsam', or 'c3gsam-dft'."
         )
     return normalized  # type: ignore[return-value]
 
@@ -473,38 +551,118 @@ def _score_dataset(
     dilation_ratio: float,
     scenes: list[str] | None = None,
     num_workers: int = DEFAULT_NUM_WORKERS,
-) -> DatasetScores:
+) -> tuple[DatasetScores, list[SceneScores]]:
     import numpy as np
+    from tqdm.auto import tqdm
+
+    from src.misc.frame_layout import list_frame_ids
 
     scene_ids = scenes if scenes is not None else TEST_SCENES[dataset]
     predictions = pred_root / dataset
 
-    ious, boundary_ious, missing_predictions = _score_gt_masks(
-        dataset_root=dataset_root,
-        pred_root=predictions,
-        scenes=scene_ids,
-        min_object_pixels=min_object_pixels,
-        dilation_ratio=dilation_ratio,
-        num_workers=num_workers,
-    )
-    warp_ious, skipped_warp_pairs = _score_adjacent_warp_masks(
-        dataset=dataset,
-        dataset_root=dataset_root,
-        pred_root=predictions,
-        scenes=scene_ids,
-        min_object_pixels=min_object_pixels,
-        num_workers=num_workers,
-    )
+    all_ious: list[float] = []
+    all_boundary_ious: list[float] = []
+    all_warp_ious: list[float] = []
+    missing_predictions = 0
+    skipped_warp_pairs = 0
+    scene_rows: list[SceneScores] = []
 
-    return DatasetScores(
-        iou=float(np.mean(ious)) if ious else 0.0,
-        boundary_iou=float(np.mean(boundary_ious)) if boundary_ious else 0.0,
-        warp_iou=float(np.mean(warp_ious)) if warp_ious else None,
-        num_scored_classes=len(ious),
-        num_warp_pairs=len(warp_ious),
+    progress = tqdm(
+        scene_ids,
+        desc=f"scores/{dataset}",
+        unit="scene",
+        dynamic_ncols=True,
+    )
+    for scene_id in progress:
+        scene_dir = dataset_root / scene_id
+        if not scene_dir.is_dir():
+            continue
+
+        num_frames = len(list_frame_ids(scene_dir))
+        progress.set_postfix_str(scene_id)
+        ious, boundary_ious, scene_missing_predictions = _score_gt_masks(
+            dataset_root=dataset_root,
+            pred_root=predictions,
+            scenes=[scene_id],
+            min_object_pixels=min_object_pixels,
+            dilation_ratio=dilation_ratio,
+            num_workers=num_workers,
+        )
+        warp_ious, scene_skipped_warp_pairs = _score_adjacent_warp_masks(
+            dataset=dataset,
+            dataset_root=dataset_root,
+            pred_root=predictions,
+            scenes=[scene_id],
+            min_object_pixels=min_object_pixels,
+            num_workers=num_workers,
+        )
+
+        scene_row = _scene_scores_from_parts(
+            dataset=dataset,
+            scene_id=scene_id,
+            num_frames=num_frames,
+            ious=ious,
+            boundary_ious=boundary_ious,
+            warp_ious=warp_ious,
+            missing_predictions=scene_missing_predictions,
+            skipped_warp_pairs=scene_skipped_warp_pairs,
+        )
+        scene_rows.append(scene_row)
+
+        all_ious.extend(ious)
+        all_boundary_ious.extend(boundary_ious)
+        all_warp_ious.extend(warp_ious)
+        missing_predictions += scene_missing_predictions
+        skipped_warp_pairs += scene_skipped_warp_pairs
+
+        progress.set_postfix(
+            scene=scene_id,
+            classes=len(all_ious),
+            warp_pairs=len(all_warp_ious),
+            missing=missing_predictions,
+        )
+
+    dataset_scores = DatasetScores(
+        iou=float(np.mean(all_ious)) if all_ious else 0.0,
+        boundary_iou=float(np.mean(all_boundary_ious)) if all_boundary_ious else 0.0,
+        warp_iou=float(np.mean(all_warp_ious)) if all_warp_ious else None,
+        num_scored_classes=len(all_ious),
+        num_warp_pairs=len(all_warp_ious),
         missing_predictions=missing_predictions,
         skipped_warp_pairs=skipped_warp_pairs,
     )
+    return dataset_scores, scene_rows
+
+
+def _write_scene_scores_csv(
+    *,
+    path: Path,
+    experiment: ExperimentName,
+    scene_rows: list[SceneScores],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=SCENE_CSV_FIELDS)
+        writer.writeheader()
+        for row in scene_rows:
+            writer.writerow(
+                {
+                    "experiment": experiment,
+                    "dataset": row.dataset,
+                    "split": "test",
+                    "scene_id": row.scene_id,
+                    "num_frames": row.num_frames,
+                    "iou": f"{row.iou:.6f}",
+                    "boundary_iou": f"{row.boundary_iou:.6f}",
+                    "warp_iou": (
+                        f"{row.warp_iou:.6f}" if row.warp_iou is not None else ""
+                    ),
+                    "num_scored_classes": row.num_scored_classes,
+                    "num_warp_pairs": row.num_warp_pairs,
+                    "missing_predictions": row.missing_predictions,
+                    "skipped_warp_pairs": row.skipped_warp_pairs,
+                }
+            )
 
 
 def _run_scoring(
@@ -519,6 +677,7 @@ def _run_scoring(
     num_workers: int = DEFAULT_NUM_WORKERS,
 ) -> dict:
     results: dict[str, dict] = {}
+    scene_rows: list[SceneScores] = []
 
     for dataset, dataset_root in (
         ("replica", Path(replica_root)),
@@ -529,7 +688,7 @@ def _run_scoring(
             dataset_scenes = scenes[dataset]  # type: ignore[index]
 
         print(f"[scores/{experiment}/{dataset}/test] scoring with {num_workers} workers...")
-        scores = _score_dataset(
+        scores, dataset_scene_rows = _score_dataset(
             dataset=dataset,  # type: ignore[arg-type]
             dataset_root=dataset_root,
             pred_root=pred_root,
@@ -538,15 +697,25 @@ def _run_scoring(
             scenes=dataset_scenes,
             num_workers=num_workers,
         )
+        scene_rows.extend(dataset_scene_rows)
         print(
             f"[scores/{experiment}/{dataset}/test] "
             f"iou={scores.iou:.4f} "
             f"boundary_iou={scores.boundary_iou:.4f} "
             f"warp_iou={scores.warp_iou} "
             f"classes={scores.num_scored_classes} "
-            f"missing={scores.missing_predictions}"
+            f"missing={scores.missing_predictions} "
+            f"scenes={len(dataset_scene_rows)}"
         )
         results[dataset] = asdict(scores)
+
+    csv_path = pred_root / SCENES_CSV_FILENAME
+    _write_scene_scores_csv(
+        path=csv_path,
+        experiment=experiment,
+        scene_rows=scene_rows,
+    )
+    print(f"Wrote per-scene CSV to {csv_path} ({len(scene_rows)} rows)")
 
     return {
         "experiment": experiment,
@@ -555,6 +724,8 @@ def _run_scoring(
         "min_object_pixels": min_object_pixels,
         "dilation_ratio": dilation_ratio,
         "num_workers": num_workers,
+        "scores_json": str(pred_root / SCORES_FILENAME),
+        "scores_csv": str(csv_path),
         "results": results,
     }
 
@@ -562,13 +733,15 @@ def _run_scoring(
 def _commit_pred_volume(experiment: ExperimentName) -> None:
     if experiment == "sam":
         vanilla_output_volume.commit()
+    elif experiment == "c3gsam-dft":
+        c3g_dft_eval_output_volume.commit()
     else:
         c3g_eval_output_volume.commit()
 
 
 @app.function(
     image=scores_image,
-    cpu=32,
+    cpu=8,
     memory=32768,
     timeout=60 * 60 * 6,
     volumes=SCORE_VOLUMES,
@@ -650,7 +823,7 @@ def smoke_scores(
     )
     scene_id = find_smoke_scene(data_root, scenes=TEST_SCENES[dataset])  # type: ignore[index]
 
-    scores = _score_dataset(
+    scores, _ = _score_dataset(
         dataset=dataset,  # type: ignore[arg-type]
         dataset_root=Path(data_root),
         pred_root=predictions_root,
@@ -710,6 +883,34 @@ def main(
         job_name=f"{experiment} mask scoring",
         detach=resolve_detach(detach=detach, remote_job=not wait),
         experiment=experiment,
+        replica_root=replica_root,
+        scannet_root=scannet_root,
+        pred_root=pred_root,
+        min_object_pixels=min_object_pixels,
+        dilation_ratio=dilation_ratio,
+        output_path=output_path,
+        num_workers=num_workers,
+    )
+
+
+@app.local_entrypoint(name="c3gsam-dft")
+def c3gsam_dft(
+    replica_root: str | None = None,
+    scannet_root: str | None = None,
+    pred_root: str | None = None,
+    min_object_pixels: int = DEFAULT_MIN_OBJECT_PIXELS,
+    dilation_ratio: float = DEFAULT_DILATION_RATIO,
+    output_path: str | None = None,
+    detach: bool | None = None,
+    wait: bool = False,
+    num_workers: int = DEFAULT_NUM_WORKERS,
+) -> None:
+    """IoU metrics for masks exported with ``modal_eval_masks.py::c3gsam-dft``."""
+    _dispatch(
+        compute_scores,
+        job_name="c3gsam-dft mask scoring",
+        detach=resolve_detach(detach=detach, remote_job=not wait),
+        experiment="c3gsam-dft",
         replica_root=replica_root,
         scannet_root=scannet_root,
         pred_root=pred_root,

@@ -14,6 +14,10 @@ C3G-SAM distillation::
     modal run src/modal_infra/modal_eval_masks.py::c3g --wait
     modal run --detach src/modal_infra/modal_eval_masks.py::c3g
 
+C3G-SAM (different learnable tokens)::
+
+    modal run src/modal_infra/modal_eval_masks.py::c3gsam-dft --wait
+
 Smoke::
 
     modal run src/modal_infra/modal_eval_masks.py::vanilla_smoke --dataset replica --wait
@@ -69,6 +73,9 @@ WANDB_SECRET = modal.Secret.from_name("wandb")
 DEFAULT_SAM_VARIANT = "sam_vit_h"
 DEFAULT_BATCH_SIZE = 32
 DEFAULT_CHECKPOINT = "distillation-base.ckpt"
+DFT_CHECKPOINT = "distillation-diff_learnable_tokens.ckpt"
+C3G_SAM_DFT_EVAL_OUTPUT_VOLUME = "c3g-sam-dft-eval-outputs"
+C3G_SAM_DFT_EVAL_OUTPUT_MOUNT = Path("/c3g-sam-dft-eval-outputs")
 C3G_EVAL_CONFIG = "c3g_sam_distill"
 DEFAULT_PROMPT_STRATEGY = "centroid"
 DEFAULT_MIN_OBJECT_PIXELS = 16
@@ -93,6 +100,9 @@ precompute_volume = modal.Volume.from_name(
 c3g_eval_output_volume = modal.Volume.from_name(
     C3G_SAM_EVAL_OUTPUT_VOLUME, create_if_missing=True
 )
+c3g_dft_eval_output_volume = modal.Volume.from_name(
+    C3G_SAM_DFT_EVAL_OUTPUT_VOLUME, create_if_missing=True
+)
 
 vanilla_eval_image = build_eval_sam_modal_image()
 c3g_eval_image = build_c3g_modal_image(
@@ -106,6 +116,15 @@ C3G_VOLUMES = {
     str(SCANNET_MOUNT): scannet_volume,
     str(PRECOMPUTE_SAM_FEATURES_MOUNT): precompute_volume,
     str(C3G_SAM_EVAL_OUTPUT_MOUNT): c3g_eval_output_volume,
+    str(C3G_SAM_DFT_EVAL_OUTPUT_MOUNT): c3g_dft_eval_output_volume,
+}
+_EVAL_OUTPUT_VOLUMES = {
+    str(C3G_SAM_EVAL_OUTPUT_MOUNT): c3g_eval_output_volume,
+    str(C3G_SAM_DFT_EVAL_OUTPUT_MOUNT): c3g_dft_eval_output_volume,
+}
+_EVAL_OUTPUT_VOLUME_NAMES = {
+    str(C3G_SAM_EVAL_OUTPUT_MOUNT): C3G_SAM_EVAL_OUTPUT_VOLUME,
+    str(C3G_SAM_DFT_EVAL_OUTPUT_MOUNT): C3G_SAM_DFT_EVAL_OUTPUT_VOLUME,
 }
 
 
@@ -267,6 +286,7 @@ class VanillaSAMService:
 def export_c3g_masks(
     evaluation_config: str = C3G_EVAL_CONFIG,
     checkpoint_name: str = DEFAULT_CHECKPOINT,
+    eval_output_mount: str = str(C3G_SAM_EVAL_OUTPUT_MOUNT),
     mask_batch_size: int = DEFAULT_BATCH_SIZE,
     limit_frames: int | None = None,
     with_lightning_test: bool = False,
@@ -308,7 +328,7 @@ def export_c3g_masks(
         f"+evaluation={evaluation_config}",
         f"checkpointing.load={checkpoint_path}",
         f"eval.mask_batch_size={mask_batch_size}",
-        f"eval.mask_output_dir={C3G_SAM_EVAL_OUTPUT_MOUNT}",
+        f"eval.mask_output_dir={eval_output_mount}",
     ]
     if limit_frames is not None:
         overrides.append(f"eval.limit_frames={limit_frames}")
@@ -344,7 +364,7 @@ def export_c3g_masks(
         wrapper,
         mask_decoder,
         datasets_by_name,
-        output_root=C3G_SAM_EVAL_OUTPUT_MOUNT,
+        output_root=Path(eval_output_mount),
         cfg_dict=cfg_dict,
         prompt_strategy=eval_cfg.get("prompt_strategy", DEFAULT_PROMPT_STRATEGY),
         min_object_pixels=int(
@@ -378,15 +398,16 @@ def export_c3g_masks(
             f"checkpointing.load={checkpoint_path}",
             f"eval.visualization_keys={json.dumps(visualization_keys)}",
             f"wandb.mode={wandb_mode}",
-            f"hydra.run.dir={C3G_SAM_EVAL_OUTPUT_MOUNT}/lightning",
+            f"hydra.run.dir={eval_output_mount}/lightning",
         ]
         if limit_test_batches is not None:
             test_cmd.append(f"trainer.limit_test_batches={limit_test_batches}")
         print("Running Lightning test:", " ".join(test_cmd))
         subprocess.run(test_cmd, check=True, cwd=str(C3G_MODAL_WORKSPACE))
 
-    c3g_eval_output_volume.commit()
-    return str(C3G_SAM_EVAL_OUTPUT_MOUNT)
+    _EVAL_OUTPUT_VOLUMES[eval_output_mount].commit()
+    print(f"Output volume: `{_EVAL_OUTPUT_VOLUME_NAMES[eval_output_mount]}`")
+    return eval_output_mount
 
 
 def _dispatch_vanilla(method_name: str, *, job_name: str, detach: bool, **kwargs) -> None:
@@ -491,6 +512,28 @@ def c3g(
         with_lightning_test=with_lightning_test,
         detach=resolve_detach(detach=detach, remote_job=not wait),
         job_name="C3G-SAM mask export",
+        app_name=APP_NAME,
+    )
+
+
+@app.local_entrypoint(name="c3gsam-dft")
+def c3gsam_dft(
+    mask_batch_size: int = DEFAULT_BATCH_SIZE,
+    with_lightning_test: bool = False,
+    detach: bool | None = None,
+    wait: bool = False,
+) -> None:
+    """C3G-SAM mask export using distillation-diff_learnable_tokens.ckpt."""
+    from src.misc.modal_run import dispatch_remote
+
+    dispatch_remote(
+        export_c3g_masks,
+        checkpoint_name=DFT_CHECKPOINT,
+        eval_output_mount=str(C3G_SAM_DFT_EVAL_OUTPUT_MOUNT),
+        mask_batch_size=mask_batch_size,
+        with_lightning_test=with_lightning_test,
+        detach=resolve_detach(detach=detach, remote_job=not wait),
+        job_name="C3G-SAM DFT mask export",
         app_name=APP_NAME,
     )
 
