@@ -62,6 +62,7 @@ from src.modal_infra.modal_common import (
     DatasetName,
     build_c3g_modal_image,
     build_eval_sam_modal_image,
+    find_modal_repo_root,
     find_smoke_frame,
     resolve_dataset_root,
     resolve_detach,
@@ -108,10 +109,16 @@ c3g_dft_eval_output_volume = modal.Volume.from_name(
 )
 
 vanilla_eval_image = build_eval_sam_modal_image()
-c3g_eval_image = build_c3g_modal_image(
-    cuda_image=EVAL_CUDA_IMAGE,
-    torch_cuda_arch_list=EVAL_TORCH_CUDA_ARCH_LIST,
-)
+_repo_root = find_modal_repo_root()
+if _repo_root is not None:
+    c3g_eval_image = build_c3g_modal_image(
+        cuda_image=EVAL_CUDA_IMAGE,
+        torch_cuda_arch_list=EVAL_TORCH_CUDA_ARCH_LIST,
+        repo_root=_repo_root,
+    )
+else:
+    # Vanilla workers mount only /root/src; C3G image is baked at local deploy time.
+    c3g_eval_image = vanilla_eval_image
 
 C3G_VOLUMES = {
     str(WEIGHTS_MOUNT): weights_volume,
@@ -133,7 +140,7 @@ _EVAL_OUTPUT_VOLUME_NAMES = {
 
 @app.cls(
     image=vanilla_eval_image,
-    gpu="T4",
+    gpu="A100-80GB",
     volumes={
         str(WEIGHTS_MOUNT): weights_volume,
         str(REPLICA_MOUNT): replica_volume,

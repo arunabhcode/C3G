@@ -357,6 +357,22 @@ PYTORCH_CU128_INDEX = "https://download.pytorch.org/whl/cu128"
 MODAL_UV_PATH = "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
+def find_modal_repo_root(*, start: Path | None = None) -> Path | None:
+    """Return repo root when ``pyproject.toml`` + ``src/`` exist, else ``None``.
+
+    Vanilla SAM workers mount only ``/root/src`` (no checkout); this returns ``None``
+    there so import-time C3G image builds are skipped.
+    """
+    here = start or Path(__file__).resolve()
+    for candidate in (here.parent, *here.parents):
+        if (candidate / "pyproject.toml").is_file() and (candidate / "src").is_dir():
+            return candidate
+    workspace = C3G_MODAL_WORKSPACE
+    if (workspace / "pyproject.toml").is_file() and (workspace / "src").is_dir():
+        return workspace
+    return None
+
+
 def build_eval_sam_modal_image(
     *,
     src_root: Path | None = None,
@@ -402,16 +418,12 @@ def build_c3g_modal_image(
     import modal
 
     if repo_root is None:
-        here = Path(__file__).resolve()
-        for candidate in (here.parent, *here.parents):
-            if (candidate / "pyproject.toml").is_file() and (candidate / "src").is_dir():
-                repo_root = candidate
-                break
-        else:
-            if (workspace / "pyproject.toml").is_file() and (workspace / "src").is_dir():
-                repo_root = workspace
-            else:
-                raise RuntimeError(f"Could not find repo root from {here}")
+        repo_root = find_modal_repo_root()
+        if repo_root is None:
+            raise RuntimeError(
+                "Could not find repo root (need pyproject.toml and src/). "
+                "Run from the C3G checkout or pass repo_root= explicitly."
+            )
 
     python_version = C3G_MODAL_PYTHON
     return (

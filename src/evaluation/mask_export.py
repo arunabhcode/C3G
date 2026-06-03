@@ -15,21 +15,12 @@ import io
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-import hydra
 import torch
 import torch.nn.functional as F
-from einops import repeat
-from omegaconf import DictConfig
 from PIL import Image
 
-from src.config import load_typed_root_config
-from src.dataset import get_dataset
-from src.dataset.data_module import get_data_shim
-from src.dataset.types import BatchedExample
-from src.global_cfg import set_cfg
-from src.misc.step_tracker import StepTracker
 from src.modal_infra.modal_common import (
     C3G_EVAL_DATASETS,
     VANILLA_EVAL_DATASETS,
@@ -38,18 +29,14 @@ from src.modal_infra.modal_common import (
     frame_mask_export_complete,
     iter_dataset_frames,
 )
-from src.model.decoder import get_decoder
-from src.model.distillation_wrapper import (
-    DebugDecoderCfg,
-    DistillationModelWrapper,
-    DistillTrainCfg,
-    OptimizerCfg as DistillOptimizerCfg,
-)
-from src.model.encoder import get_encoder
 from src.model.prompt_sampler import PromptSampler, decompose_label_map
-from src.model.sam_decoder import SAMMaskDecoderWrapper
-from src.model.types import Gaussians
-from src.loss import get_losses
+
+if TYPE_CHECKING:
+    from omegaconf import DictConfig
+
+    from src.dataset.types import BatchedExample
+    from src.model.distillation_wrapper import DistillationModelWrapper
+    from src.model.sam_decoder import SAMMaskDecoderWrapper
 
 CoordFrame = Literal["original", "sam"]
 DEFAULT_PROMPT_STRATEGY = "centroid"
@@ -343,7 +330,7 @@ def decode_float_array(payload: dict[str, Any]):
 
     shape = tuple(payload["shape"])
     raw = base64.b64decode(payload["data_b64"])
-    return np.frombuffer(raw, dtype=np.float32).reshape(shape)
+    return np.frombuffer(raw, dtype=np.float32).reshape(shape).copy()
 
 
 def run_vanilla_sam_predict(
@@ -716,6 +703,8 @@ def render_target_features(
     wrapper: DistillationModelWrapper,
     batch: BatchedExample,
 ) -> torch.Tensor:
+    from src.model.types import Gaussians
+
     _, _, _, h, w = batch["target"]["image"].shape
     wrapper._validate_distill_batch_shapes(batch, h, w)
 
@@ -760,6 +749,8 @@ def _flush_c3g_mask_batch(
     batch_prompts: list[tuple[list[list[float]], list[int]]],
     pred_root: Path,
 ) -> int:
+    from einops import repeat
+
     if not batch_items:
         return 0
 
@@ -816,6 +807,8 @@ def export_c3g_sam_masks(
 ) -> dict[str, Any]:
     """Export C3G-rendered SAM masks for Replica + ScanNet test."""
     import numpy as np
+
+    from src.dataset.data_module import get_data_shim
     from src.dataset.scannet_2dseg_splits import scenes_for_stage
 
     data_shim = get_data_shim(wrapper.encoder)
@@ -1007,6 +1000,18 @@ def export_c3g_sam_masks(
 
 
 def build_distillation_wrapper(cfg_dict: DictConfig) -> DistillationModelWrapper:
+    from src.config import load_typed_root_config
+    from src.loss import get_losses
+    from src.misc.step_tracker import StepTracker
+    from src.model.decoder import get_decoder
+    from src.model.distillation_wrapper import (
+        DebugDecoderCfg,
+        DistillationModelWrapper,
+        DistillTrainCfg,
+        OptimizerCfg as DistillOptimizerCfg,
+    )
+    from src.model.encoder import get_encoder
+
     cfg = load_typed_root_config(cfg_dict)
     cfg.model.encoder.feature_dim = cfg.model.encoder.gaussian_feature_dim
 
@@ -1064,6 +1069,12 @@ def load_checkpoint_into_wrapper(
 
 def run_c3g_mask_export_from_hydra(cfg_dict: DictConfig) -> dict[str, Any]:
     """Hydra entry: load distillation checkpoint and export masks."""
+    from src.config import load_typed_root_config
+    from src.dataset import get_dataset
+    from src.global_cfg import set_cfg
+    from src.misc.step_tracker import StepTracker
+    from src.model.sam_decoder import SAMMaskDecoderWrapper
+
     set_cfg(cfg_dict)
     eval_cfg = cfg_dict.get("eval", {})
 
@@ -1111,11 +1122,13 @@ def run_c3g_mask_export_from_hydra(cfg_dict: DictConfig) -> dict[str, Any]:
     )
 
 
-@hydra.main(version_base=None, config_path="../../config", config_name="main")
-def main(cfg_dict: DictConfig) -> None:
-    """Local C3G mask export (Hydra)."""
-    run_c3g_mask_export_from_hydra(cfg_dict)
-
-
 if __name__ == "__main__":
+    import hydra
+    from omegaconf import DictConfig
+
+    @hydra.main(version_base=None, config_path="../../config", config_name="main")
+    def main(cfg_dict: DictConfig) -> None:
+        """Local C3G mask export (Hydra)."""
+        run_c3g_mask_export_from_hydra(cfg_dict)
+
     main()
