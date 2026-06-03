@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
@@ -46,7 +47,144 @@ from src.modal_infra.modal_common import (
 APP_NAME = "c3g-get-scores"
 DEFAULT_MIN_OBJECT_PIXELS = 16
 DEFAULT_DILATION_RATIO = 0.02
+DEFAULT_NUM_WORKERS = 32
 SCORES_FILENAME = "scores.json"
+def _score_gt_frame_task(args: tuple) -> tuple[list[float], list[float], int]:
+    import numpy as np
+    from PIL import Image
+
+    from src.misc.frame_layout import FramePaths
+
+    (
+        scene_dir_str,
+        pred_scene_dir_str,
+        frame_id,
+        min_object_pixels,
+        dilation_ratio,
+    ) = args
+    scene_dir = Path(scene_dir_str)
+    pred_scene_dir = Path(pred_scene_dir_str)
+
+    paths = FramePaths.from_frame_id(scene_dir, frame_id)
+    if not paths.label.is_file():
+        return [], [], 0
+
+    gt_dense = np.array(Image.open(paths.label))
+    gt_classes = set(
+        expected_mask_class_ids(paths.label, min_object_pixels=min_object_pixels)
+    )
+    pred_dense, missing = _build_dense_pred_mask(
+        pred_scene_dir / frame_id,
+        gt_dense.shape[:2],
+        sorted(gt_classes),
+    )
+    shared_classes = gt_classes & _classes_in_dense_map(pred_dense)
+    frame_ious, frame_boundary_ious = _shared_class_iou_scores(
+        pred_dense,
+        gt_dense,
+        shared_classes,
+        dilation_ratio=dilation_ratio,
+    )
+    return frame_ious, frame_boundary_ious, missing
+
+
+def _score_warp_pair_task(args: tuple) -> tuple[float | None, int]:
+    import numpy as np
+    from PIL import Image
+
+    from src.evaluation.mask_metrics import warp_mask_iou
+    from src.misc.frame_layout import FramePaths
+
+    (
+        dataset,
+        scene_dir_str,
+        pred_scene_dir_str,
+        frame_a,
+        frame_b,
+        min_object_pixels,
+    ) = args
+    scene_dir = Path(scene_dir_str)
+    pred_scene_dir = Path(pred_scene_dir_str)
+
+    paths_a = FramePaths.from_frame_id(scene_dir, frame_a)
+    paths_b = FramePaths.from_frame_id(scene_dir, frame_b)
+
+    if not (
+        paths_a.camera.is_file()
+        and paths_b.camera.is_file()
+        and paths_a.label.is_file()
+        and paths_b.label.is_file()
+    ):
+        return None, 1
+
+    label_a = np.array(Image.open(paths_a.label))
+    image_size = tuple(label_a.shape[:2])
+    depth_a = _load_frame_depth_meters(
+        scene_dir, frame_a, dataset=dataset, image_size=image_size
+    )
+    depth_b = _load_frame_depth_meters(
+        scene_dir, frame_b, dataset=dataset, image_size=image_size
+    )
+    if depth_a is None or depth_b is None:
+        return None, 1
+
+    ext_a, int_a = _load_camera_npz(paths_a.camera)
+    ext_b, int_b = _load_camera_npz(paths_b.camera)
+
+    gt_classes_a = set(
+        expected_mask_class_ids(paths_a.label, min_object_pixels=min_object_pixels)
+    )
+    gt_classes_b = set(
+        expected_mask_class_ids(paths_b.label, min_object_pixels=min_object_pixels)
+    )
+    pred_dense_a, _ = _build_dense_pred_mask(
+        pred_scene_dir / frame_a,
+        image_size,
+        sorted(gt_classes_a),
+    )
+    pred_dense_b, _ = _build_dense_pred_mask(
+        pred_scene_dir / frame_b,
+        image_size,
+        sorted(gt_classes_b),
+    )
+    shared_classes = _classes_in_dense_map(pred_dense_a) & _classes_in_dense_map(
+        pred_dense_b
+    )
+    if not shared_classes:
+        return None, 1
+
+    pair_scores: list[float] = []
+    for class_id in sorted(shared_classes):
+        pred_a = (pred_dense_a == class_id).astype(np.uint8)
+        pred_b = (pred_dense_b == class_id).astype(np.uint8)
+        pair_scores.append(
+            warp_mask_iou(
+                pred_a,
+                pred_b,
+                ext_a,
+                ext_b,
+                int_a,
+                int_b,
+                image_size,
+                depth=depth_a,
+            )
+        )
+        pair_scores.append(
+            warp_mask_iou(
+                pred_b,
+                pred_a,
+                ext_b,
+                ext_a,
+                int_b,
+                int_a,
+                image_size,
+                depth=depth_b,
+            )
+        )
+
+    if not pair_scores:
+        return None, 1
+    return float(np.mean(pair_scores)), 0
 
 ExperimentName = Literal["sam", "c3gsam"]
 DatasetName = Literal["replica", "scannet"]
@@ -222,6 +360,7 @@ def _load_frame_depth_meters(
     return depth_m
 
 
+
 def _score_gt_masks(
     *,
     dataset_root: Path,
@@ -229,49 +368,48 @@ def _score_gt_masks(
     scenes: list[str],
     min_object_pixels: int,
     dilation_ratio: float,
+    num_workers: int,
 ) -> tuple[list[float], list[float], int]:
-    import numpy as np
-    from PIL import Image
+    from src.misc.frame_layout import list_frame_ids
 
-    from src.misc.frame_layout import FramePaths, list_frame_ids
+    tasks: list[tuple] = []
+    for scene_id in scenes:
+        scene_dir = dataset_root / scene_id
+        if not scene_dir.is_dir():
+            continue
+        pred_scene_dir = pred_root / scene_id
+        for frame_id in list_frame_ids(scene_dir):
+            tasks.append(
+                (
+                    str(scene_dir),
+                    str(pred_scene_dir),
+                    frame_id,
+                    min_object_pixels,
+                    dilation_ratio,
+                )
+            )
 
     ious: list[float] = []
     boundary_ious: list[float] = []
     missing_predictions = 0
 
-    for scene_id in scenes:
-        scene_dir = dataset_root / scene_id
-        if not scene_dir.is_dir():
-            continue
-        for frame_id in list_frame_ids(scene_dir):
-            paths = FramePaths.from_frame_id(scene_dir, frame_id)
-            if not paths.label.is_file():
-                continue
+    if not tasks:
+        return ious, boundary_ious, missing_predictions
 
-            gt_dense = np.array(Image.open(paths.label))
-            gt_classes = set(
-                expected_mask_class_ids(
-                    paths.label, min_object_pixels=min_object_pixels
-                )
-            )
-            pred_dense, missing = _build_dense_pred_mask(
-                pred_root / scene_id / frame_id,
-                gt_dense.shape[:2],
-                sorted(gt_classes),
-            )
-            missing_predictions += missing
+    workers = max(1, min(num_workers, len(tasks)))
+    if workers == 1:
+        results = map(_score_gt_frame_task, tasks)
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            results = executor.map(_score_gt_frame_task, tasks, chunksize=8)
 
-            shared_classes = gt_classes & _classes_in_dense_map(pred_dense)
-            frame_ious, frame_boundary_ious = _shared_class_iou_scores(
-                pred_dense,
-                gt_dense,
-                shared_classes,
-                dilation_ratio=dilation_ratio,
-            )
-            ious.extend(frame_ious)
-            boundary_ious.extend(frame_boundary_ious)
+    for frame_ious, frame_boundary_ious, missing in results:
+        ious.extend(frame_ious)
+        boundary_ious.extend(frame_boundary_ious)
+        missing_predictions += missing
 
     return ious, boundary_ious, missing_predictions
+
 
 
 def _score_adjacent_warp_masks(
@@ -281,112 +419,47 @@ def _score_adjacent_warp_masks(
     pred_root: Path,
     scenes: list[str],
     min_object_pixels: int,
+    num_workers: int,
 ) -> tuple[list[float], int]:
-    import numpy as np
-    from PIL import Image
+    from src.misc.frame_layout import list_frame_ids
 
-    from src.evaluation.mask_metrics import warp_mask_iou
-    from src.misc.frame_layout import FramePaths, list_frame_ids
-
-    warp_ious: list[float] = []
-    skipped_warp_pairs = 0
-
+    tasks: list[tuple] = []
     for scene_id in scenes:
         scene_dir = dataset_root / scene_id
         if not scene_dir.is_dir():
             continue
 
         frame_ids = list_frame_ids(scene_dir)
+        pred_scene_dir = pred_root / scene_id
         for frame_index in range(len(frame_ids) - 1):
-            frame_a = frame_ids[frame_index]
-            frame_b = frame_ids[frame_index + 1]
-            paths_a = FramePaths.from_frame_id(scene_dir, frame_a)
-            paths_b = FramePaths.from_frame_id(scene_dir, frame_b)
-
-            if not (
-                paths_a.camera.is_file()
-                and paths_b.camera.is_file()
-                and paths_a.label.is_file()
-                and paths_b.label.is_file()
-            ):
-                skipped_warp_pairs += 1
-                continue
-
-            label_a = np.array(Image.open(paths_a.label))
-            image_size = tuple(label_a.shape[:2])
-            depth_a = _load_frame_depth_meters(
-                scene_dir, frame_a, dataset=dataset, image_size=image_size
-            )
-            depth_b = _load_frame_depth_meters(
-                scene_dir, frame_b, dataset=dataset, image_size=image_size
-            )
-            if depth_a is None or depth_b is None:
-                skipped_warp_pairs += 1
-                continue
-
-            ext_a, int_a = _load_camera_npz(paths_a.camera)
-            ext_b, int_b = _load_camera_npz(paths_b.camera)
-
-            gt_classes_a = set(
-                expected_mask_class_ids(
-                    paths_a.label, min_object_pixels=min_object_pixels
+            tasks.append(
+                (
+                    dataset,
+                    str(scene_dir),
+                    str(pred_scene_dir),
+                    frame_ids[frame_index],
+                    frame_ids[frame_index + 1],
+                    min_object_pixels,
                 )
             )
-            gt_classes_b = set(
-                expected_mask_class_ids(
-                    paths_b.label, min_object_pixels=min_object_pixels
-                )
-            )
-            pred_dense_a, _ = _build_dense_pred_mask(
-                pred_root / scene_id / frame_a,
-                image_size,
-                sorted(gt_classes_a),
-            )
-            pred_dense_b, _ = _build_dense_pred_mask(
-                pred_root / scene_id / frame_b,
-                image_size,
-                sorted(gt_classes_b),
-            )
-            shared_classes = _classes_in_dense_map(
-                pred_dense_a
-            ) & _classes_in_dense_map(pred_dense_b)
-            if not shared_classes:
-                skipped_warp_pairs += 1
-                continue
 
-            pair_scores: list[float] = []
-            for class_id in sorted(shared_classes):
-                pred_a = (pred_dense_a == class_id).astype(np.uint8)
-                pred_b = (pred_dense_b == class_id).astype(np.uint8)
-                pair_scores.append(
-                    warp_mask_iou(
-                        pred_a,
-                        pred_b,
-                        ext_a,
-                        ext_b,
-                        int_a,
-                        int_b,
-                        image_size,
-                        depth=depth_a,
-                    )
-                )
-                pair_scores.append(
-                    warp_mask_iou(
-                        pred_b,
-                        pred_a,
-                        ext_b,
-                        ext_a,
-                        int_b,
-                        int_a,
-                        image_size,
-                        depth=depth_b,
-                    )
-                )
+    warp_ious: list[float] = []
+    skipped_warp_pairs = 0
 
-            if not pair_scores:
-                skipped_warp_pairs += 1
-                continue
-            warp_ious.append(float(np.mean(pair_scores)))
+    if not tasks:
+        return warp_ious, skipped_warp_pairs
+
+    workers = max(1, min(num_workers, len(tasks)))
+    if workers == 1:
+        results = map(_score_warp_pair_task, tasks)
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            results = executor.map(_score_warp_pair_task, tasks, chunksize=4)
+
+    for warp_iou, skipped in results:
+        if warp_iou is not None:
+            warp_ious.append(warp_iou)
+        skipped_warp_pairs += skipped
 
     return warp_ious, skipped_warp_pairs
 
@@ -399,6 +472,7 @@ def _score_dataset(
     min_object_pixels: int,
     dilation_ratio: float,
     scenes: list[str] | None = None,
+    num_workers: int = DEFAULT_NUM_WORKERS,
 ) -> DatasetScores:
     import numpy as np
 
@@ -411,6 +485,7 @@ def _score_dataset(
         scenes=scene_ids,
         min_object_pixels=min_object_pixels,
         dilation_ratio=dilation_ratio,
+        num_workers=num_workers,
     )
     warp_ious, skipped_warp_pairs = _score_adjacent_warp_masks(
         dataset=dataset,
@@ -418,6 +493,7 @@ def _score_dataset(
         pred_root=predictions,
         scenes=scene_ids,
         min_object_pixels=min_object_pixels,
+        num_workers=num_workers,
     )
 
     return DatasetScores(
@@ -440,6 +516,7 @@ def _run_scoring(
     min_object_pixels: int,
     dilation_ratio: float,
     scenes: dict[DatasetName, list[str]] | None = None,
+    num_workers: int = DEFAULT_NUM_WORKERS,
 ) -> dict:
     results: dict[str, dict] = {}
 
@@ -451,7 +528,7 @@ def _run_scoring(
         if scenes is not None:
             dataset_scenes = scenes[dataset]  # type: ignore[index]
 
-        print(f"[scores/{experiment}/{dataset}/test] scoring...")
+        print(f"[scores/{experiment}/{dataset}/test] scoring with {num_workers} workers...")
         scores = _score_dataset(
             dataset=dataset,  # type: ignore[arg-type]
             dataset_root=dataset_root,
@@ -459,6 +536,7 @@ def _run_scoring(
             min_object_pixels=min_object_pixels,
             dilation_ratio=dilation_ratio,
             scenes=dataset_scenes,
+            num_workers=num_workers,
         )
         print(
             f"[scores/{experiment}/{dataset}/test] "
@@ -476,6 +554,7 @@ def _run_scoring(
         "pred_root": str(pred_root),
         "min_object_pixels": min_object_pixels,
         "dilation_ratio": dilation_ratio,
+        "num_workers": num_workers,
         "results": results,
     }
 
@@ -489,7 +568,7 @@ def _commit_pred_volume(experiment: ExperimentName) -> None:
 
 @app.function(
     image=scores_image,
-    cpu=4,
+    cpu=32,
     memory=32768,
     timeout=60 * 60 * 6,
     volumes=SCORE_VOLUMES,
@@ -502,6 +581,7 @@ def compute_scores(
     min_object_pixels: int = DEFAULT_MIN_OBJECT_PIXELS,
     dilation_ratio: float = DEFAULT_DILATION_RATIO,
     output_path: str | None = None,
+    num_workers: int = DEFAULT_NUM_WORKERS,
 ) -> dict:
     """Score exported masks on Modal worker volumes."""
     experiment_name = _resolve_experiment(experiment)
@@ -533,6 +613,7 @@ def compute_scores(
         pred_root=predictions_root,
         min_object_pixels=min_object_pixels,
         dilation_ratio=dilation_ratio,
+        num_workers=num_workers,
     )
 
     out_path = Path(output_path) if output_path else predictions_root / SCORES_FILENAME
@@ -545,7 +626,7 @@ def compute_scores(
 
 @app.function(
     image=scores_image,
-    cpu=2,
+    cpu=8,
     memory=8192,
     timeout=60 * 30,
     volumes=SCORE_VOLUMES,
@@ -556,6 +637,7 @@ def smoke_scores(
     dataset_root: str | None = None,
     pred_root: str | None = None,
     min_object_pixels: int = DEFAULT_MIN_OBJECT_PIXELS,
+    num_workers: int = 8,
 ) -> dict:
     """Score one test scene as a quick sanity check."""
     experiment_name = _resolve_experiment(experiment)
@@ -575,6 +657,7 @@ def smoke_scores(
         min_object_pixels=min_object_pixels,
         dilation_ratio=DEFAULT_DILATION_RATIO,
         scenes=[scene_id],
+        num_workers=num_workers,
     )
 
     payload = {
@@ -582,6 +665,7 @@ def smoke_scores(
         "dataset": dataset,
         "split": "test",
         "scene_id": scene_id,
+        "num_workers": num_workers,
         "scores": asdict(scores),
     }
     print(json.dumps(payload, indent=2))
@@ -617,6 +701,7 @@ def main(
     output_path: str | None = None,
     detach: bool | None = None,
     wait: bool = False,
+    num_workers: int = DEFAULT_NUM_WORKERS,
 ) -> None:
     """Score exported masks for Replica + ScanNet test splits."""
     _resolve_experiment(experiment)
@@ -631,6 +716,7 @@ def main(
         min_object_pixels=min_object_pixels,
         dilation_ratio=dilation_ratio,
         output_path=output_path,
+        num_workers=num_workers,
     )
 
 
@@ -643,6 +729,7 @@ def smoke(
     min_object_pixels: int = DEFAULT_MIN_OBJECT_PIXELS,
     detach: bool | None = None,
     wait: bool = False,
+    num_workers: int = 8,
 ) -> None:
     """Smoke test: score a single test scene."""
     _resolve_experiment(experiment)
@@ -655,4 +742,5 @@ def smoke(
         dataset_root=dataset_root,
         pred_root=pred_root,
         min_object_pixels=min_object_pixels,
+        num_workers=num_workers,
     )
