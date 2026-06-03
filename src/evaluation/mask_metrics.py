@@ -40,15 +40,37 @@ def mask_to_boundary(mask: np.ndarray, dilation_ratio: float = 0.02) -> np.ndarr
     return mask_u8 - eroded
 
 
+def binary_mask_iou_counts(
+    pred: np.ndarray | Tensor,
+    gt: np.ndarray | Tensor,
+) -> tuple[int, int]:
+    """Pixel intersection and union for binary masks (for global IoU aggregation)."""
+    m1 = _to_bool_numpy(pred)
+    m2 = _to_bool_numpy(gt)
+    intersection = int(np.logical_and(m1, m2).sum())
+    union = int(np.logical_or(m1, m2).sum())
+    return intersection, union
+
+
+def binary_boundary_iou_counts(
+    pred: np.ndarray | Tensor,
+    gt: np.ndarray | Tensor,
+    dilation_ratio: float = 0.02,
+) -> tuple[int, int]:
+    """Boundary-band intersection and union for binary masks."""
+    pred_b = mask_to_boundary(_to_bool_numpy(pred).astype(np.uint8), dilation_ratio)
+    gt_b = mask_to_boundary(_to_bool_numpy(gt).astype(np.uint8), dilation_ratio)
+    intersection = int(((pred_b > 0) & (gt_b > 0)).sum())
+    union = int(((pred_b > 0) | (gt_b > 0)).sum())
+    return intersection, union
+
+
 def mask_iou(
     pred: np.ndarray | Tensor,
     gt: np.ndarray | Tensor,
 ) -> float:
     """Standard binary IoU between prediction and ground-truth (or reference) mask."""
-    m1 = _to_bool_numpy(pred)
-    m2 = _to_bool_numpy(gt)
-    intersection = np.logical_and(m1, m2).sum()
-    union = np.logical_or(m1, m2).sum()
+    intersection, union = binary_mask_iou_counts(pred, gt)
     if union == 0:
         return 1.0
     return float(intersection / union)
@@ -60,10 +82,7 @@ def boundary_iou(
     dilation_ratio: float = 0.02,
 ) -> float:
     """IoU computed on boundary pixels only (pred vs label mask)."""
-    pred_b = mask_to_boundary(_to_bool_numpy(pred).astype(np.uint8), dilation_ratio)
-    gt_b = mask_to_boundary(_to_bool_numpy(gt).astype(np.uint8), dilation_ratio)
-    intersection = ((pred_b > 0) & (gt_b > 0)).sum()
-    union = ((pred_b > 0) | (gt_b > 0)).sum()
+    intersection, union = binary_boundary_iou_counts(pred, gt, dilation_ratio)
     if union == 0:
         return 1.0
     return float(intersection / union)

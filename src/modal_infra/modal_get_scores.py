@@ -8,8 +8,8 @@ Reads predictions from ``vanilla-sam-outputs`` (``sam``), ``c3g-sam-eval-outputs
 (``c3gsam``), or ``c3g-sam-dft-eval-outputs`` (``c3gsam-dft``) and compares them
 to Replica + ScanNet **test** labels:
 
-- **IoU** (dense pred vs GT label map; mean over classes present in both)
-- **boundary mIoU** (same shared-class set, boundary IoU per class)
+- **IoU** (global pixel IoU over all GT-present class instances and frames)
+- **boundary IoU** (global boundary-band IoU, same aggregation)
 - **warp mIoU** (dense pred maps warped across adjacent frames; classes present in both frames only; uses `{frame_id}_depth.png`)
 
 Writes ``scores.json`` (dataset-level aggregates) and ``scores_by_scene.csv`` (one row per scene).
@@ -77,7 +77,7 @@ SCENE_CSV_FIELDS = [
 ]
 
 
-def _score_gt_frame_task(args: tuple) -> tuple[list[float], list[float], int]:
+def _score_gt_frame_task(args: tuple) -> tuple[int, int, int, int, int, int]:
     import numpy as np
     from PIL import Image
 
@@ -95,7 +95,7 @@ def _score_gt_frame_task(args: tuple) -> tuple[list[float], list[float], int]:
 
     paths = FramePaths.from_frame_id(scene_dir, frame_id)
     if not paths.label.is_file():
-        return [], [], 0
+        return 0, 0, 0, 0, 0, 0
 
     gt_dense = np.array(Image.open(paths.label))
     gt_classes = set(
@@ -108,14 +108,20 @@ def _score_gt_frame_task(args: tuple) -> tuple[list[float], list[float], int]:
         sorted(gt_classes),
     )
     _save_dense_pred_mask(frame_pred_dir, pred_dense)
-    shared_classes = gt_classes & _classes_in_dense_map(pred_dense)
-    frame_ious, frame_boundary_ious = _shared_class_iou_scores(
+    counts = _accumulate_frame_global_iou_counts(
         pred_dense,
         gt_dense,
-        shared_classes,
+        gt_classes,
         dilation_ratio=dilation_ratio,
     )
-    return frame_ious, frame_boundary_ious, missing
+    return (
+        counts.intersection,
+        counts.union,
+        counts.boundary_intersection,
+        counts.boundary_union,
+        counts.num_gt_classes,
+        missing,
+    )
 
 
 def _score_warp_pair_task(args: tuple) -> tuple[float | None, int]:
@@ -259,6 +265,41 @@ SCORE_VOLUMES = {
 
 
 @dataclass
+class GlobalIouCounts:
+    """Accumulated pixel counts for global (micro) semantic IoU."""
+
+    intersection: int = 0
+    union: int = 0
+    boundary_intersection: int = 0
+    boundary_union: int = 0
+    num_gt_classes: int = 0
+
+    def add(
+        self,
+        *,
+        intersection: int = 0,
+        union: int = 0,
+        boundary_intersection: int = 0,
+        boundary_union: int = 0,
+        num_gt_classes: int = 0,
+    ) -> None:
+        self.intersection += intersection
+        self.union += union
+        self.boundary_intersection += boundary_intersection
+        self.boundary_union += boundary_union
+        self.num_gt_classes += num_gt_classes
+
+    def add_counts(self, other: GlobalIouCounts) -> None:
+        self.add(
+            intersection=other.intersection,
+            union=other.union,
+            boundary_intersection=other.boundary_intersection,
+            boundary_union=other.boundary_union,
+            num_gt_classes=other.num_gt_classes,
+        )
+
+
+@dataclass
 class DatasetScores:
     iou: float
     boundary_iou: float
@@ -283,6 +324,12 @@ class SceneScores:
     skipped_warp_pairs: int
 
 
+def _global_iou_from_counts(intersection: int, union: int) -> float:
+    if union == 0:
+        return 0.0
+    return float(intersection / union)
+
+
 def _mean_or_zero(values: list[float]) -> float:
     import numpy as np
 
@@ -294,8 +341,7 @@ def _scene_scores_from_parts(
     dataset: str,
     scene_id: str,
     num_frames: int,
-    ious: list[float],
-    boundary_ious: list[float],
+    gt_counts: GlobalIouCounts,
     warp_ious: list[float],
     missing_predictions: int,
     skipped_warp_pairs: int,
@@ -305,10 +351,12 @@ def _scene_scores_from_parts(
         dataset=dataset,
         scene_id=scene_id,
         num_frames=num_frames,
-        iou=_mean_or_zero(ious),
-        boundary_iou=_mean_or_zero(boundary_ious),
+        iou=_global_iou_from_counts(gt_counts.intersection, gt_counts.union),
+        boundary_iou=_global_iou_from_counts(
+            gt_counts.boundary_intersection, gt_counts.boundary_union
+        ),
         warp_iou=warp_mean,
-        num_scored_classes=len(ious),
+        num_scored_classes=gt_counts.num_gt_classes,
         num_warp_pairs=len(warp_ious),
         missing_predictions=missing_predictions,
         skipped_warp_pairs=skipped_warp_pairs,
@@ -413,27 +461,35 @@ def _save_dense_pred_mask(frame_pred_dir: Path, dense) -> None:
     )
 
 
-def _shared_class_iou_scores(
+def _accumulate_frame_global_iou_counts(
     pred_dense,
-    ref_dense,
-    class_ids: set[int],
+    gt_dense,
+    gt_classes: set[int],
     *,
     dilation_ratio: float,
-) -> tuple[list[float], list[float]]:
-    from src.evaluation.mask_metrics import boundary_iou, mask_iou
+) -> GlobalIouCounts:
+    """Sum IoU counts over every GT-present class in one frame."""
+    from src.evaluation.mask_metrics import (
+        binary_boundary_iou_counts,
+        binary_mask_iou_counts,
+    )
 
-    ious: list[float] = []
-    boundary_ious: list[float] = []
-    for class_id in sorted(class_ids):
+    counts = GlobalIouCounts()
+    for class_id in sorted(gt_classes):
         pred_bin = pred_dense == class_id
-        ref_bin = ref_dense == class_id
-        if not pred_bin.any() or not ref_bin.any():
-            continue
-        ious.append(mask_iou(pred_bin, ref_bin))
-        boundary_ious.append(
-            boundary_iou(pred_bin, ref_bin, dilation_ratio=dilation_ratio)
+        gt_bin = gt_dense == class_id
+        inter, union = binary_mask_iou_counts(pred_bin, gt_bin)
+        b_inter, b_union = binary_boundary_iou_counts(
+            pred_bin, gt_bin, dilation_ratio=dilation_ratio
         )
-    return ious, boundary_ious
+        counts.add(
+            intersection=inter,
+            union=union,
+            boundary_intersection=b_inter,
+            boundary_union=b_union,
+            num_gt_classes=1,
+        )
+    return counts
 
 
 def _frame_depth_path(scene_dir: Path, frame_id: str) -> Path:
@@ -491,7 +547,7 @@ def _score_gt_masks(
     min_object_pixels: int,
     dilation_ratio: float,
     num_workers: int,
-) -> tuple[list[float], list[float], int]:
+) -> tuple[GlobalIouCounts, int]:
     from src.misc.frame_layout import list_frame_ids
 
     tasks: list[tuple] = []
@@ -511,12 +567,11 @@ def _score_gt_masks(
                 )
             )
 
-    ious: list[float] = []
-    boundary_ious: list[float] = []
+    totals = GlobalIouCounts()
     missing_predictions = 0
 
     if not tasks:
-        return ious, boundary_ious, missing_predictions
+        return totals, missing_predictions
 
     workers = max(1, min(num_workers, len(tasks)))
     if workers == 1:
@@ -525,12 +580,17 @@ def _score_gt_masks(
         with ProcessPoolExecutor(max_workers=workers) as executor:
             results = executor.map(_score_gt_frame_task, tasks, chunksize=8)
 
-    for frame_ious, frame_boundary_ious, missing in results:
-        ious.extend(frame_ious)
-        boundary_ious.extend(frame_boundary_ious)
+    for inter, union, b_inter, b_union, num_gt, missing in results:
+        totals.add(
+            intersection=inter,
+            union=union,
+            boundary_intersection=b_inter,
+            boundary_union=b_union,
+            num_gt_classes=num_gt,
+        )
         missing_predictions += missing
 
-    return ious, boundary_ious, missing_predictions
+    return totals, missing_predictions
 
 
 
@@ -604,8 +664,7 @@ def _score_dataset(
     scene_ids = scenes if scenes is not None else TEST_SCENES[dataset]
     predictions = pred_root / dataset
 
-    all_ious: list[float] = []
-    all_boundary_ious: list[float] = []
+    dataset_gt_counts = GlobalIouCounts()
     all_warp_ious: list[float] = []
     missing_predictions = 0
     skipped_warp_pairs = 0
@@ -624,7 +683,7 @@ def _score_dataset(
 
         num_frames = len(list_frame_ids(scene_dir))
         progress.set_postfix_str(scene_id)
-        ious, boundary_ious, scene_missing_predictions = _score_gt_masks(
+        scene_gt_counts, scene_missing_predictions = _score_gt_masks(
             dataset_root=dataset_root,
             pred_root=predictions,
             scenes=[scene_id],
@@ -645,32 +704,35 @@ def _score_dataset(
             dataset=dataset,
             scene_id=scene_id,
             num_frames=num_frames,
-            ious=ious,
-            boundary_ious=boundary_ious,
+            gt_counts=scene_gt_counts,
             warp_ious=warp_ious,
             missing_predictions=scene_missing_predictions,
             skipped_warp_pairs=scene_skipped_warp_pairs,
         )
         scene_rows.append(scene_row)
 
-        all_ious.extend(ious)
-        all_boundary_ious.extend(boundary_ious)
+        dataset_gt_counts.add_counts(scene_gt_counts)
         all_warp_ious.extend(warp_ious)
         missing_predictions += scene_missing_predictions
         skipped_warp_pairs += scene_skipped_warp_pairs
 
         progress.set_postfix(
             scene=scene_id,
-            classes=len(all_ious),
+            gt_classes=dataset_gt_counts.num_gt_classes,
             warp_pairs=len(all_warp_ious),
             missing=missing_predictions,
         )
 
     dataset_scores = DatasetScores(
-        iou=float(np.mean(all_ious)) if all_ious else 0.0,
-        boundary_iou=float(np.mean(all_boundary_ious)) if all_boundary_ious else 0.0,
+        iou=_global_iou_from_counts(
+            dataset_gt_counts.intersection, dataset_gt_counts.union
+        ),
+        boundary_iou=_global_iou_from_counts(
+            dataset_gt_counts.boundary_intersection,
+            dataset_gt_counts.boundary_union,
+        ),
         warp_iou=float(np.mean(all_warp_ious)) if all_warp_ious else None,
-        num_scored_classes=len(all_ious),
+        num_scored_classes=dataset_gt_counts.num_gt_classes,
         num_warp_pairs=len(all_warp_ious),
         missing_predictions=missing_predictions,
         skipped_warp_pairs=skipped_warp_pairs,
