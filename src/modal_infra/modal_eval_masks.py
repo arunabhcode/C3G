@@ -75,6 +75,10 @@ DEFAULT_MIN_OBJECT_PIXELS = 16
 DEFAULT_VISUALIZATION_COUNT = 5
 DEFAULT_VISUALIZATION_SEED = 42
 
+# T4 eval: CUDA 12.4 + PyTorch cu124, targeting Turing sm_75.
+EVAL_CUDA_IMAGE = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+EVAL_TORCH_CUDA_ARCH_LIST = "7.5"
+
 app = modal.App(APP_NAME)
 
 weights_volume = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
@@ -91,7 +95,10 @@ c3g_eval_output_volume = modal.Volume.from_name(
 )
 
 vanilla_eval_image = build_eval_sam_modal_image()
-c3g_eval_image = build_c3g_modal_image()
+c3g_eval_image = build_c3g_modal_image(
+    cuda_image=EVAL_CUDA_IMAGE,
+    torch_cuda_arch_list=EVAL_TORCH_CUDA_ARCH_LIST,
+)
 
 C3G_VOLUMES = {
     str(WEIGHTS_MOUNT): weights_volume,
@@ -104,7 +111,7 @@ C3G_VOLUMES = {
 
 @app.cls(
     image=vanilla_eval_image,
-    gpu="H200",
+    gpu="T4",
     volumes={
         str(WEIGHTS_MOUNT): weights_volume,
         str(REPLICA_MOUNT): replica_volume,
@@ -250,7 +257,7 @@ class VanillaSAMService:
 
 @app.function(
     image=c3g_eval_image,
-    gpu="H200",
+    gpu="T4",
     cpu=8,
     timeout=60 * 60 * 24,
     memory=131072,

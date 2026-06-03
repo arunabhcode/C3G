@@ -58,6 +58,15 @@ from src.modal_infra.modal_common import (
 APP_NAME = "c3g-precompute-sam-features"
 WORKSPACE = C3G_MODAL_WORKSPACE
 
+# H200 precompute: CUDA 12.4 + PyTorch cu124, targeting Hopper sm_90.
+PRECOMPUTE_CUDA_IMAGE = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+PRECOMPUTE_TORCH_CUDA_ARCH_LIST = "9.0"
+
+precompute_image = build_c3g_modal_image(
+    cuda_image=PRECOMPUTE_CUDA_IMAGE,
+    torch_cuda_arch_list=PRECOMPUTE_TORCH_CUDA_ARCH_LIST,
+)
+
 app = modal.App(APP_NAME)
 weights_volume = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
 replica_volume = modal.Volume.from_name(REPLICA_VOLUME, create_if_missing=True)
@@ -68,7 +77,7 @@ precompute_volume = modal.Volume.from_name(
 
 
 @app.function(
-    image=build_c3g_modal_image(),
+    image=precompute_image,
     gpu="H200",
     timeout=60 * 60 * 24,
     volumes={

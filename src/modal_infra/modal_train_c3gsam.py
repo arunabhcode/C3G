@@ -63,6 +63,15 @@ FULL_TRAINING_CONFIGS = frozenset(TRAINING_CONFIG_BY_EXPERIMENT.values())
 APP_NAME = "c3g-sam-precomputed-train"
 WANDB_SECRET = modal.Secret.from_name("wandb")
 
+# A100 training: CUDA 12.4 + PyTorch cu124, targeting Ampere sm_80.
+TRAIN_CUDA_IMAGE = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+TRAIN_TORCH_CUDA_ARCH_LIST = "8.0"
+
+train_image = build_c3g_modal_image(
+    cuda_image=TRAIN_CUDA_IMAGE,
+    torch_cuda_arch_list=TRAIN_TORCH_CUDA_ARCH_LIST,
+)
+
 app = modal.App(APP_NAME)
 weights_volume = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
 scannet_volume = modal.Volume.from_name(SCANNET_VOLUME, create_if_missing=True)
@@ -98,8 +107,8 @@ def resolve_training_config(
 
 
 @app.function(
-    image=build_c3g_modal_image(),
-    gpu="H200",
+    image=train_image,
+    gpu="A100-40GB",
     cpu=8,
     timeout=60 * 60 * 24,
     memory=131072, #128 GB RAM

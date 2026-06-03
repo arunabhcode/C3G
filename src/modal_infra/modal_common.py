@@ -352,9 +352,6 @@ PYTORCH_CU124_INDEX = "https://download.pytorch.org/whl/cu124"
 PYTORCH_CU128_INDEX = "https://download.pytorch.org/whl/cu128"
 MODAL_UV_PATH = "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# Match distillation_sanity_check.sh / pyproject.toml (torch cu128, Blackwell sm_120).
-C3G_CUDA_IMAGE = "nvidia/cuda:12.8.0-devel-ubuntu24.04"
-C3G_TORCH_CUDA_ARCH_LIST = "9.0"
 
 def build_eval_sam_modal_image(
     *,
@@ -374,7 +371,8 @@ def build_eval_sam_modal_image(
         .env({"PATH": MODAL_UV_PATH})
         .run_commands(
             f"uv pip install --system --python {VANILLA_SAM_PYTHON} "
-            "numpy==1.26.4 pillow==11.0.0 fastapi==0.118.0 pydantic==2.11.4",
+            "numpy==1.26.4 pillow==11.0.0 opencv-python-headless==4.10.0.84 "
+            "fastapi==0.118.0 pydantic==2.11.4",
             f"uv pip install --system --python {VANILLA_SAM_PYTHON} "
             f"torch==2.5.1 torchvision==0.20.1 --index-url {PYTORCH_CU124_INDEX}",
             f"uv pip install --system --python {VANILLA_SAM_PYTHON} "
@@ -391,10 +389,10 @@ def build_eval_sam_modal_image(
 
 def build_c3g_modal_image(
     *,
+    cuda_image: str,
+    torch_cuda_arch_list: str,
     repo_root: Path | None = None,
     workspace: Path = C3G_MODAL_WORKSPACE,
-    cuda_image: str = C3G_CUDA_IMAGE,
-    torch_cuda_arch_list: str = C3G_TORCH_CUDA_ARCH_LIST,
 ):
     """CUDA image for C3G on Modal: copy repo to ``/workspace`` and ``uv pip install -e``."""
     import modal
@@ -432,7 +430,7 @@ def build_c3g_modal_image(
                 "PATH": MODAL_UV_PATH,
                 "TORCH_CUDA_ARCH_LIST": torch_cuda_arch_list,
                 "FORCE_CUDA": "1",
-                "UV_INDEX_PYTORCH_CU128_URL": PYTORCH_CU128_INDEX,
+                "UV_INDEX_PYTORCH_CU124_URL": PYTORCH_CU124_INDEX,
             }
         )
         .add_local_dir(

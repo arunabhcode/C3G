@@ -176,7 +176,8 @@ def warp_mask_to_pose(
 
     in_bounds = valid & (u_dst >= 0) & (u_dst < W) & (v_dst >= 0) & (v_dst < H)
     mask_flat = mask_t.reshape(-1).bool()
-    fg_and_valid = mask_flat & in_bounds
+    valid_src_depth = z.reshape(-1) > 1e-6
+    fg_and_valid = mask_flat & in_bounds & valid_src_depth
 
     warped = torch.zeros(H, W, dtype=torch.uint8, device=device)
     warped[v_dst[fg_and_valid], u_dst[fg_and_valid]] = 255
