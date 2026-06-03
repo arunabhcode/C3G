@@ -287,6 +287,7 @@ def export_c3g_masks(
     evaluation_config: str = C3G_EVAL_CONFIG,
     checkpoint_name: str = DEFAULT_CHECKPOINT,
     eval_output_mount: str = str(C3G_SAM_EVAL_OUTPUT_MOUNT),
+    different_learnable_tokens: bool = False,
     mask_batch_size: int = DEFAULT_BATCH_SIZE,
     limit_frames: int | None = None,
     with_lightning_test: bool = False,
@@ -330,6 +331,8 @@ def export_c3g_masks(
         f"eval.mask_batch_size={mask_batch_size}",
         f"eval.mask_output_dir={eval_output_mount}",
     ]
+    if different_learnable_tokens:
+        overrides.append("model.encoder.different_learnable_tokens=true")
     if limit_frames is not None:
         overrides.append(f"eval.limit_frames={limit_frames}")
 
@@ -402,6 +405,8 @@ def export_c3g_masks(
         ]
         if limit_test_batches is not None:
             test_cmd.append(f"trainer.limit_test_batches={limit_test_batches}")
+        if different_learnable_tokens:
+            test_cmd.append("model.encoder.different_learnable_tokens=true")
         print("Running Lightning test:", " ".join(test_cmd))
         subprocess.run(test_cmd, check=True, cwd=str(C3G_MODAL_WORKSPACE))
 
@@ -530,6 +535,7 @@ def c3gsam_dft(
         export_c3g_masks,
         checkpoint_name=DFT_CHECKPOINT,
         eval_output_mount=str(C3G_SAM_DFT_EVAL_OUTPUT_MOUNT),
+        different_learnable_tokens=True,
         mask_batch_size=mask_batch_size,
         with_lightning_test=with_lightning_test,
         detach=resolve_detach(detach=detach, remote_job=not wait),
