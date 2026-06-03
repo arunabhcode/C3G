@@ -284,11 +284,15 @@ def frame_mask_export_complete(
     frame_id: str,
     class_ids: list[int],
 ) -> bool:
-    """True when every expected class mask PNG exists for this frame."""
+    """True when every expected class mask PNG and logits NPY exist for this frame."""
     if not class_ids:
         return True
     frame_dir = pred_root / scene_id / frame_id
-    return all((frame_dir / f"{class_id}.png").is_file() for class_id in class_ids)
+    return all(
+        (frame_dir / f"{class_id}.png").is_file()
+        and (frame_dir / f"{class_id}_logits.npy").is_file()
+        for class_id in class_ids
+    )
 
 
 def scene_mask_export_complete(

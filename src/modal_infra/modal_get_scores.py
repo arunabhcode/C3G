@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Modal runner to score exported SAM / C3G-SAM masks against GT test labels.
 
+Dense predictions merge per-class PNGs with logit-aware overlap resolution using
+``{class_id}_logits.npy`` when present (see ``_build_dense_pred_mask``).
+
 Reads predictions from ``vanilla-sam-outputs`` (``sam``), ``c3g-sam-eval-outputs``
 (``c3gsam``), or ``c3g-sam-dft-eval-outputs`` (``c3gsam-dft``) and compares them
 to Replica + ScanNet **test** labels:
@@ -10,6 +13,7 @@ to Replica + ScanNet **test** labels:
 - **warp mIoU** (dense pred maps warped across adjacent frames; classes present in both frames only; uses `{frame_id}_depth.png`)
 
 Writes ``scores.json`` (dataset-level aggregates) and ``scores_by_scene.csv`` (one row per scene).
+Also writes ``dense_mask.png`` per frame under ``<pred_root>/<dataset>/<scene>/<frame>/``.
 
 Examples::
 
@@ -55,6 +59,7 @@ DEFAULT_DILATION_RATIO = 0.02
 DEFAULT_NUM_WORKERS = 8
 SCORES_FILENAME = "scores.json"
 SCENES_CSV_FILENAME = "scores_by_scene.csv"
+DENSE_MASK_FILENAME = "dense_mask.png"
 
 SCENE_CSV_FIELDS = [
     "experiment",
@@ -96,11 +101,13 @@ def _score_gt_frame_task(args: tuple) -> tuple[list[float], list[float], int]:
     gt_classes = set(
         expected_mask_class_ids(paths.label, min_object_pixels=min_object_pixels)
     )
+    frame_pred_dir = pred_scene_dir / frame_id
     pred_dense, missing = _build_dense_pred_mask(
-        pred_scene_dir / frame_id,
+        frame_pred_dir,
         gt_dense.shape[:2],
         sorted(gt_classes),
     )
+    _save_dense_pred_mask(frame_pred_dir, pred_dense)
     shared_classes = gt_classes & _classes_in_dense_map(pred_dense)
     frame_ious, frame_boundary_ious = _shared_class_iou_scores(
         pred_dense,
@@ -350,23 +357,60 @@ def _classes_in_dense_map(dense) -> set[int]:
     return {int(class_id) for class_id in np.unique(dense) if class_id != 0}
 
 
+def _resize_logits_to_label_shape(logits, label_shape: tuple[int, int]):
+    import cv2
+
+    if tuple(logits.shape[:2]) == label_shape:
+        return logits
+    height, width = label_shape
+    return cv2.resize(
+        logits.astype("float32", copy=False),
+        (width, height),
+        interpolation=cv2.INTER_LINEAR,
+    )
+
+
 def _build_dense_pred_mask(
     frame_pred_dir: Path,
     label_shape: tuple[int, int],
     class_ids: list[int],
 ) -> tuple:
-    """Merge per-class binary PNGs into one dense label map."""
+    """Merge per-class binary PNGs into one dense label map.
+
+    Overlapping pixels are assigned to the class with the highest saved logit
+    (``{class_id}_logits.npy``). Classes only claim pixels inside their binary mask.
+    Predictions without logits are skipped and counted as missing.
+    """
     import numpy as np
 
     dense = np.zeros(label_shape, dtype=np.int32)
+    best_logit = np.full(label_shape, -np.inf, dtype=np.float32)
     missing_predictions = 0
     for class_id in class_ids:
         binary = _load_pred_mask(frame_pred_dir / f"{class_id}.png")
-        if binary is None:
+        logits_path = frame_pred_dir / f"{class_id}_logits.npy"
+        if binary is None or not logits_path.is_file():
             missing_predictions += 1
             continue
-        dense[_pred_mask_to_bool(binary)] = class_id
+        mask = _pred_mask_to_bool(binary)
+        logits = np.load(logits_path).astype(np.float32)
+        if tuple(logits.shape[:2]) != label_shape:
+            logits = _resize_logits_to_label_shape(logits, label_shape)
+        update = mask & (logits > best_logit)
+        dense[update] = class_id
+        best_logit[update] = logits[update]
     return dense, missing_predictions
+
+
+def _save_dense_pred_mask(frame_pred_dir: Path, dense) -> None:
+    """Write merged per-frame prediction map next to per-class exports."""
+    import numpy as np
+    from PIL import Image
+
+    frame_pred_dir.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(dense.astype(np.uint16)).save(
+        frame_pred_dir / DENSE_MASK_FILENAME
+    )
 
 
 def _shared_class_iou_scores(

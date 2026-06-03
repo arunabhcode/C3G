@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Modal mask export for vanilla SAM and C3G-SAM (shared layout and resume logic).
 
+Per-class exports include ``<class_id>.png`` and ``<class_id>_logits.npy`` (full-res
+logits before thresholding) for logit-aware overlap resolution at scoring time.
+
 Heavy deps (torch, Hydra, C3G stack) are imported only inside remote workers, not
 when Modal loads this file locally for ``modal run``.
 

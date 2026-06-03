@@ -3,7 +3,9 @@
 Output layout (both backends)::
 
     <output_root>/replica/<scene_id>/<frame_id>/<class_id>.png
+    <output_root>/replica/<scene_id>/<frame_id>/<class_id>_logits.npy
     <output_root>/scannet/<scene_id>/<frame_id>/<class_id>.png
+    <output_root>/scannet/<scene_id>/<frame_id>/<class_id>_logits.npy
 """
 
 from __future__ import annotations
@@ -62,6 +64,8 @@ CONTROLLED_EVAL_MANIFEST: dict[str, Any] = {
     "multimask_selection": "predicted_iou_head",
     "logit_upsampling": "bilinear_align_corners_false_to_label_size",
     "threshold": "logits>0",
+    "per_class_logits": "class_id_logits.npy_at_label_resolution",
+    "overlap_resolution": "per_pixel_max_logit_within_binary_mask",
 }
 
 
@@ -162,11 +166,11 @@ def select_best_multimask_index(iou_predictions: torch.Tensor) -> int:
     return int(iou_predictions.argmax().detach().cpu().item())
 
 
-def upsample_logits_to_label_mask(
+def upsample_logits_to_label_shape(
     logits: torch.Tensor,
     label_size: tuple[int, int],
 ):
-    """Upsample decoder logits to label resolution and threshold at zero."""
+    """Upsample decoder logits to label resolution (float32, no threshold)."""
     import numpy as np
 
     tensor = logits.detach().cpu().float()
@@ -180,7 +184,19 @@ def upsample_logits_to_label_mask(
         mode="bilinear",
         align_corners=False,
     ).squeeze(0).squeeze(0)
-    return (upsampled > 0.0).numpy()
+    return upsampled.numpy().astype(np.float32, copy=False)
+
+
+def upsample_logits_to_label_mask(
+    logits: torch.Tensor,
+    label_size: tuple[int, int],
+):
+    """Upsample decoder logits to label resolution and threshold at zero."""
+    return upsample_logits_to_label_shape(logits, label_size) > 0.0
+
+
+def logits_npy_path_for_mask_png(mask_png_path: Path) -> Path:
+    return mask_png_path.with_name(f"{mask_png_path.stem}_logits.npy")
 
 
 def save_controlled_eval_mask(
@@ -189,13 +205,17 @@ def save_controlled_eval_mask(
     label_size: tuple[int, int],
     path: Path,
 ) -> None:
-    """Select multimask via IoU head, upsample logits, assert label resolution."""
+    """Select multimask via IoU head; save thresholded PNG and full-res logits."""
+    import numpy as np
+
     best_idx = select_best_multimask_index(iou_predictions)
-    mask = upsample_logits_to_label_mask(low_res_logits[best_idx], label_size)
+    label_logits = upsample_logits_to_label_shape(low_res_logits[best_idx], label_size)
+    mask = label_logits > 0.0
     assert mask.shape == label_size, (
         f"mask shape {mask.shape} != label shape {label_size}"
     )
     save_mask_png(mask, path)
+    np.save(logits_npy_path_for_mask_png(path), label_logits)
 
 
 def class_prompts_from_label(
@@ -757,7 +777,8 @@ def _flush_c3g_mask_batch(
         device=device,
     )
 
-    pred_masks, iou_predictions = mask_decoder(
+    # SAM mask_decoder returns low-res logits (not postprocessed/thresholded masks).
+    low_res_logits, iou_predictions = mask_decoder(
         features,
         point_coords=point_coords,
         point_labels=point_labels,
@@ -771,7 +792,7 @@ def _flush_c3g_mask_batch(
             gt = gt.squeeze(0)
         label_size = tuple(gt.shape[-2:])
         save_controlled_eval_mask(
-            pred_masks[index].detach().cpu(),
+            low_res_logits[index].detach().cpu(),
             iou_predictions[index].detach().cpu(),
             label_size,
             pred_root / scene_id / frame_id / f"{class_id}.png",
