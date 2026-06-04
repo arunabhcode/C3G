@@ -86,9 +86,11 @@ DEFAULT_MIN_OBJECT_PIXELS = 16
 DEFAULT_VISUALIZATION_COUNT = 5
 DEFAULT_VISUALIZATION_SEED = 42
 
-# T4 eval: CUDA 12.4 + PyTorch cu124, targeting Turing sm_75.
-EVAL_CUDA_IMAGE = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
-EVAL_TORCH_CUDA_ARCH_LIST = "7.5"
+# Vanilla SAM: H200 + Hopper sm_90.
+VANILLA_TORCH_CUDA_ARCH_LIST = "9.0"
+# C3G eval: T4 + Turing sm_75.
+C3G_EVAL_CUDA_IMAGE = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+C3G_EVAL_TORCH_CUDA_ARCH_LIST = "7.5"
 
 app = modal.App(APP_NAME)
 
@@ -108,12 +110,14 @@ c3g_dft_eval_output_volume = modal.Volume.from_name(
     C3G_SAM_DFT_EVAL_OUTPUT_VOLUME, create_if_missing=True
 )
 
-vanilla_eval_image = build_eval_sam_modal_image()
+vanilla_eval_image = build_eval_sam_modal_image().env(
+    {"TORCH_CUDA_ARCH_LIST": VANILLA_TORCH_CUDA_ARCH_LIST}
+)
 _repo_root = find_modal_repo_root()
 if _repo_root is not None:
     c3g_eval_image = build_c3g_modal_image(
-        cuda_image=EVAL_CUDA_IMAGE,
-        torch_cuda_arch_list=EVAL_TORCH_CUDA_ARCH_LIST,
+        cuda_image=C3G_EVAL_CUDA_IMAGE,
+        torch_cuda_arch_list=C3G_EVAL_TORCH_CUDA_ARCH_LIST,
         repo_root=_repo_root,
     )
 else:
@@ -140,7 +144,7 @@ _EVAL_OUTPUT_VOLUME_NAMES = {
 
 @app.cls(
     image=vanilla_eval_image,
-    gpu="A100-80GB",
+    gpu="H200",
     volumes={
         str(WEIGHTS_MOUNT): weights_volume,
         str(REPLICA_MOUNT): replica_volume,
