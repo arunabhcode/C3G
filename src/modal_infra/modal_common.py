@@ -377,6 +377,7 @@ def build_eval_sam_modal_image(
     *,
     src_root: Path | None = None,
     remote_root: Path = VANILLA_SAM_MODAL_ROOT,
+    extra_env: dict[str, str] | None = None,
 ):
     """Lightweight image for ``modal_eval_masks`` vanilla SAM (``uv pip install``)."""
     import modal
@@ -384,6 +385,9 @@ def build_eval_sam_modal_image(
     # Resolve from this file so local dev and vanilla Modal workers (/root/src) both work
     # without a full repo checkout (workers mount only src/, not pyproject.toml).
     src = src_root or Path(__file__).resolve().parent.parent
+    image_env = {"PYTHONPATH": str(remote_root)}
+    if extra_env:
+        image_env.update(extra_env)
     return (
         modal.Image.debian_slim(python_version=VANILLA_SAM_PYTHON)
         .apt_install("git", "ca-certificates", "curl")
@@ -398,7 +402,7 @@ def build_eval_sam_modal_image(
             f"uv pip install --system --python {VANILLA_SAM_PYTHON} "
             '"segment-anything @ git+https://github.com/facebookresearch/segment-anything.git"',
         )
-        .env({"PYTHONPATH": str(remote_root)})
+        .env(image_env)
         .add_local_dir(
             str(src),
             remote_path=str(remote_root / "src"),

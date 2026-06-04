@@ -21,6 +21,10 @@ C3G-SAM (different learnable tokens)::
 
     modal run src/modal_infra/modal_eval_masks.py::c3gsam-dft --wait
 
+C3G-SAM (no mag head)::
+
+    modal run src/modal_infra/modal_eval_masks.py::c3gsam-nomaghead --wait
+
 Smoke::
 
     modal run src/modal_infra/modal_eval_masks.py::vanilla_smoke --dataset replica --wait
@@ -78,8 +82,11 @@ DEFAULT_SAM_VARIANT = "sam_vit_h"
 DEFAULT_BATCH_SIZE = 32
 DEFAULT_CHECKPOINT = "distillation-base.ckpt"
 DFT_CHECKPOINT = "distillation-diff_learnable_tokens.ckpt"
+NOMAGHEAD_CHECKPOINT = "c3gsam-nomaghead.ckpt"
 C3G_SAM_DFT_EVAL_OUTPUT_VOLUME = "c3g-sam-dft-eval-outputs"
 C3G_SAM_DFT_EVAL_OUTPUT_MOUNT = Path("/c3g-sam-dft-eval-outputs")
+C3G_SAM_NOMAGHEAD_EVAL_OUTPUT_VOLUME = "c3g-sam-nomaghead-eval-outputs"
+C3G_SAM_NOMAGHEAD_EVAL_OUTPUT_MOUNT = Path("/c3g-sam-nomaghead-eval-outputs")
 C3G_EVAL_CONFIG = "c3g_sam_distill"
 DEFAULT_PROMPT_STRATEGY = "centroid"
 DEFAULT_MIN_OBJECT_PIXELS = 16
@@ -109,9 +116,12 @@ c3g_eval_output_volume = modal.Volume.from_name(
 c3g_dft_eval_output_volume = modal.Volume.from_name(
     C3G_SAM_DFT_EVAL_OUTPUT_VOLUME, create_if_missing=True
 )
+c3g_nomaghead_eval_output_volume = modal.Volume.from_name(
+    C3G_SAM_NOMAGHEAD_EVAL_OUTPUT_VOLUME, create_if_missing=True
+)
 
-vanilla_eval_image = build_eval_sam_modal_image().env(
-    {"TORCH_CUDA_ARCH_LIST": VANILLA_TORCH_CUDA_ARCH_LIST}
+vanilla_eval_image = build_eval_sam_modal_image(
+    extra_env={"TORCH_CUDA_ARCH_LIST": VANILLA_TORCH_CUDA_ARCH_LIST}
 )
 _repo_root = find_modal_repo_root()
 if _repo_root is not None:
@@ -131,14 +141,17 @@ C3G_VOLUMES = {
     str(PRECOMPUTE_SAM_FEATURES_MOUNT): precompute_volume,
     str(C3G_SAM_EVAL_OUTPUT_MOUNT): c3g_eval_output_volume,
     str(C3G_SAM_DFT_EVAL_OUTPUT_MOUNT): c3g_dft_eval_output_volume,
+    str(C3G_SAM_NOMAGHEAD_EVAL_OUTPUT_MOUNT): c3g_nomaghead_eval_output_volume,
 }
 _EVAL_OUTPUT_VOLUMES = {
     str(C3G_SAM_EVAL_OUTPUT_MOUNT): c3g_eval_output_volume,
     str(C3G_SAM_DFT_EVAL_OUTPUT_MOUNT): c3g_dft_eval_output_volume,
+    str(C3G_SAM_NOMAGHEAD_EVAL_OUTPUT_MOUNT): c3g_nomaghead_eval_output_volume,
 }
 _EVAL_OUTPUT_VOLUME_NAMES = {
     str(C3G_SAM_EVAL_OUTPUT_MOUNT): C3G_SAM_EVAL_OUTPUT_VOLUME,
     str(C3G_SAM_DFT_EVAL_OUTPUT_MOUNT): C3G_SAM_DFT_EVAL_OUTPUT_VOLUME,
+    str(C3G_SAM_NOMAGHEAD_EVAL_OUTPUT_MOUNT): C3G_SAM_NOMAGHEAD_EVAL_OUTPUT_VOLUME,
 }
 
 
@@ -554,6 +567,28 @@ def c3gsam_dft(
         with_lightning_test=with_lightning_test,
         detach=resolve_detach(detach=detach, remote_job=not wait),
         job_name="C3G-SAM DFT mask export",
+        app_name=APP_NAME,
+    )
+
+
+@app.local_entrypoint(name="c3gsam-nomaghead")
+def c3gsam_nomaghead(
+    mask_batch_size: int = DEFAULT_BATCH_SIZE,
+    with_lightning_test: bool = False,
+    detach: bool | None = None,
+    wait: bool = False,
+) -> None:
+    """C3G-SAM mask export using c3gsam-nomaghead.ckpt (same config as ``c3g``)."""
+    from src.misc.modal_run import dispatch_remote
+
+    dispatch_remote(
+        export_c3g_masks,
+        checkpoint_name=NOMAGHEAD_CHECKPOINT,
+        eval_output_mount=str(C3G_SAM_NOMAGHEAD_EVAL_OUTPUT_MOUNT),
+        mask_batch_size=mask_batch_size,
+        with_lightning_test=with_lightning_test,
+        detach=resolve_detach(detach=detach, remote_job=not wait),
+        job_name="C3G-SAM nomaghead mask export",
         app_name=APP_NAME,
     )
 
