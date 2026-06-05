@@ -5,8 +5,9 @@ Dense predictions merge per-class PNGs with logit-aware overlap resolution using
 ``{class_id}_logits.npy`` when present (see ``_build_dense_pred_mask``).
 
 Reads predictions from ``vanilla-sam-outputs`` (``sam``), ``c3g-sam-eval-outputs``
-(``c3gsam``), ``c3g-sam-dft-eval-outputs`` (``c3gsam-dft``), or
-``c3g-sam-nomaghead-eval-outputs`` (``c3gsam-nomaghead``) and compares them
+(``c3gsam``), ``c3g-sam-dft-eval-outputs`` (``c3gsam-dft``),
+``c3g-sam-nomaghead-eval-outputs`` (``c3gsam-nomaghead``), or
+``c3g-sam-ema-nomag-eval-outputs`` (``c3gsam-ema-nomag``) and compares them
 to Replica + ScanNet **test** labels:
 
 - **IoU** (global pixel IoU over all GT-present class instances and frames)
@@ -22,6 +23,7 @@ Examples::
     modal run src/modal_infra/modal_get_scores.py --experiment c3gsam --wait
     modal run src/modal_infra/modal_get_scores.py::c3gsam-dft --wait
     modal run src/modal_infra/modal_get_scores.py::c3gsam-nomaghead --wait
+    modal run src/modal_infra/modal_get_scores.py::c3gsam-ema-nomag --wait
     modal run src/modal_infra/modal_get_scores.py::smoke --experiment sam --wait
 """
 
@@ -228,8 +230,12 @@ C3G_SAM_DFT_EVAL_OUTPUT_VOLUME = "c3g-sam-dft-eval-outputs"
 C3G_SAM_DFT_EVAL_OUTPUT_MOUNT = Path("/c3g-sam-dft-eval-outputs")
 C3G_SAM_NOMAGHEAD_EVAL_OUTPUT_VOLUME = "c3g-sam-nomaghead-eval-outputs"
 C3G_SAM_NOMAGHEAD_EVAL_OUTPUT_MOUNT = Path("/c3g-sam-nomaghead-eval-outputs")
+C3G_SAM_EMA_NOMAG_EVAL_OUTPUT_VOLUME = "c3g-sam-ema-nomag-eval-outputs"
+C3G_SAM_EMA_NOMAG_EVAL_OUTPUT_MOUNT = Path("/c3g-sam-ema-nomag-eval-outputs")
 
-ExperimentName = Literal["sam", "c3gsam", "c3gsam-dft", "c3gsam-nomaghead"]
+ExperimentName = Literal[
+    "sam", "c3gsam", "c3gsam-dft", "c3gsam-nomaghead", "c3gsam-ema-nomag"
+]
 DatasetName = Literal["replica", "scannet"]
 
 TEST_SCENES: dict[DatasetName, list[str]] = {
@@ -242,6 +248,7 @@ EXPERIMENT_PRED_ROOTS: dict[ExperimentName, Path] = {
     "c3gsam": C3G_SAM_EVAL_OUTPUT_MOUNT,
     "c3gsam-dft": C3G_SAM_DFT_EVAL_OUTPUT_MOUNT,
     "c3gsam-nomaghead": C3G_SAM_NOMAGHEAD_EVAL_OUTPUT_MOUNT,
+    "c3gsam-ema-nomag": C3G_SAM_EMA_NOMAG_EVAL_OUTPUT_MOUNT,
 }
 
 app = modal.App(APP_NAME)
@@ -260,6 +267,9 @@ c3g_dft_eval_output_volume = modal.Volume.from_name(
 c3g_nomaghead_eval_output_volume = modal.Volume.from_name(
     C3G_SAM_NOMAGHEAD_EVAL_OUTPUT_VOLUME, create_if_missing=True
 )
+c3g_ema_nomag_eval_output_volume = modal.Volume.from_name(
+    C3G_SAM_EMA_NOMAG_EVAL_OUTPUT_VOLUME, create_if_missing=True
+)
 
 scores_image = build_eval_sam_modal_image()
 
@@ -270,6 +280,7 @@ SCORE_VOLUMES = {
     str(C3G_SAM_EVAL_OUTPUT_MOUNT): c3g_eval_output_volume,
     str(C3G_SAM_DFT_EVAL_OUTPUT_MOUNT): c3g_dft_eval_output_volume,
     str(C3G_SAM_NOMAGHEAD_EVAL_OUTPUT_MOUNT): c3g_nomaghead_eval_output_volume,
+    str(C3G_SAM_EMA_NOMAG_EVAL_OUTPUT_MOUNT): c3g_ema_nomag_eval_output_volume,
 }
 
 
@@ -377,7 +388,8 @@ def _resolve_experiment(experiment: str) -> ExperimentName:
     if normalized not in EXPERIMENT_PRED_ROOTS:
         raise ValueError(
             f"Unknown experiment {experiment!r}; expected "
-            f"'sam', 'c3gsam', 'c3gsam-dft', or 'c3gsam-nomaghead'."
+            f"'sam', 'c3gsam', 'c3gsam-dft', 'c3gsam-nomaghead', or "
+            f"'c3gsam-ema-nomag'."
         )
     return normalized  # type: ignore[return-value]
 
@@ -852,6 +864,8 @@ def _commit_pred_volume(experiment: ExperimentName) -> None:
         c3g_dft_eval_output_volume.commit()
     elif experiment == "c3gsam-nomaghead":
         c3g_nomaghead_eval_output_volume.commit()
+    elif experiment == "c3gsam-ema-nomag":
+        c3g_ema_nomag_eval_output_volume.commit()
     else:
         c3g_eval_output_volume.commit()
 
@@ -1056,6 +1070,34 @@ def c3gsam_nomaghead(
         job_name="c3gsam-nomaghead mask scoring",
         detach=resolve_detach(detach=detach, remote_job=not wait),
         experiment="c3gsam-nomaghead",
+        replica_root=replica_root,
+        scannet_root=scannet_root,
+        pred_root=pred_root,
+        min_object_pixels=min_object_pixels,
+        dilation_ratio=dilation_ratio,
+        output_path=output_path,
+        num_workers=num_workers,
+    )
+
+
+@app.local_entrypoint(name="c3gsam-ema-nomag")
+def c3gsam_ema_nomag(
+    replica_root: str | None = None,
+    scannet_root: str | None = None,
+    pred_root: str | None = None,
+    min_object_pixels: int = DEFAULT_MIN_OBJECT_PIXELS,
+    dilation_ratio: float = DEFAULT_DILATION_RATIO,
+    output_path: str | None = None,
+    detach: bool | None = None,
+    wait: bool = False,
+    num_workers: int = DEFAULT_NUM_WORKERS,
+) -> None:
+    """IoU metrics for masks exported with ``modal_eval_masks.py::c3gsam-ema-nomag``."""
+    _dispatch(
+        compute_scores,
+        job_name="c3gsam-ema-nomag mask scoring",
+        detach=resolve_detach(detach=detach, remote_job=not wait),
+        experiment="c3gsam-ema-nomag",
         replica_root=replica_root,
         scannet_root=scannet_root,
         pred_root=pred_root,
