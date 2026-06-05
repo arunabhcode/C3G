@@ -610,6 +610,8 @@ flowchart LR
 | `feature_magnitude` | L1 on channel norms | `feature_mag_loss_weight: 0.5` |
 | MSE (optional) | RGB render vs GT | from `loss: [mse]` |
 
+Equations: [§5.4](#54-training-loss-mathematics).
+
 ### 5.3 Prompted SAM (`ModelWrapper`)
 
 [`src/model/model_wrapper.py`](../src/model/model_wrapper.py)
@@ -634,11 +636,238 @@ flowchart TB
 |------|--------|-------|
 | `feature_rendering_loss` | rendered `[B,V,256,64,64]` vs SAM | weight `1.0` in prompted ScanNet config |
 | `prompted_segmentation` | `[N,256,64,64]` → masks `[N,3,256,256]` | [`loss_segmentation_prompted.py`](../src/loss/loss_segmentation_prompted.py) |
-| RGB losses | `color` vs GT | if configured in `loss:` list |
+| `mse` / `lpips` | rendered `color` vs GT RGB | Hydra `loss: [mse, lpips]` (weights from [`config/loss/`](../config/loss/)) |
 
 **Prompted segmentation:** GT `label` maps decomposed into binary masks; `PromptSampler` yields point coords/labels; frozen `SAMMaskDecoderWrapper` predicts 3 mask hypotheses; best BCE+Dice is kept.
 
-### 5.4 What is frozen vs trained (typical SAM config)
+See [§5.4](#54-training-loss-mathematics) for the full equations.
+
+### 5.4 Training loss mathematics
+
+[`src/main.py`](../src/main.py) does not implement losses directly; it routes to one of two Lightning wrappers based on `train.pipeline`:
+
+```python
+use_distillation = cfg.train.pipeline == "distillation"
+# distillation  → DistillationModelWrapper
+# else          → ModelWrapper  (prompted C3G-SAM when prompt_mode=prompted)
+```
+
+Both paths share the same **render → upsample → compare** pattern for feature supervision. Let subscripts index batch `b`, view `v`, channel `c`, and spatial `(h,w)`.
+
+#### Shared rendering notation
+
+The encoder builds 3D Gaussians from **context** views only. Before the decoder, **geometry is detached** so feature losses train the Instill value stream and per-Gaussian `feature` vectors without moving means / covariances / opacities:
+
+```python
+gaussians_detached = Gaussians(..., feature=gaussians.feature)  # means/cov/harmonics/opacities .detach()
+```
+
+The rasterizer produces `output.feature` with shape `[B, V, C, H, W]` where `H=W=224` and `C=256`. For loss, features are bilinearly upsampled to SAM resolution `64×64`:
+
+\[
+\hat{\mathbf{f}}_{b,v,h,w} = \text{Interp}_{224\to64}\!\big(\text{raster}(\text{Gaussians})_{b,v,\cdot,h,w}\big) \in \mathbb{R}^{C}
+\]
+
+Ground-truth SAM maps are \(\mathbf{f}^{\text{gt}}_{b,v,h,w} \in \mathbb{R}^{C}\) (from disk or live encoder). When `context_view_loss=true` (default in both ScanNet configs), views are concatenated **target-first**:
+
+\[
+V = V_t + V_c, \quad \mathbf{f}^{\text{gt}} = \text{concat}(\mathbf{f}^{\text{target}}, \mathbf{f}^{\text{context}}), \quad \hat{\mathbf{f}} \text{ uses the same view order.}
+\]
+
+Distillation crops both tensors to the valid SAM region (currently the full `64×64` grid). Prompted feature loss merges context+target SAM via [`_sam_features_for_loss`](../src/model/model_wrapper.py) and [`reorder_context_target`](../src/misc/sam_features.py) to match render order.
+
+#### Distillation objective (`DistillationModelWrapper`)
+
+Implemented in [`distillation_wrapper.py`](../src/model/distillation_wrapper.py) (`compute_feature_losses`, `training_step`).
+
+**Cosine (direction) loss** — per-pixel \(\ell_2\)-normalize along the channel axis, then one minus dot product, averaged over all pixels and views:
+
+\[
+\mathcal{L}_{\text{cos}} = \frac{1}{B\,V\,H_s\,W_s} \sum_{b,v,h,w}
+\left(
+1 - \frac{\hat{\mathbf{f}}_{b,v,h,w}^{\top}\,\mathbf{f}^{\text{gt}}_{b,v,h,w}}
+{\|\hat{\mathbf{f}}_{b,v,h,w}\|_2\,\|\mathbf{f}^{\text{gt}}_{b,v,h,w}\|_2 + \varepsilon}
+\right)
+\]
+
+with \(\varepsilon = 10^{-8}\). Equivalent to `F.cosine_similarity(..., dim=2)` then `(1 - sim).mean()`.
+
+**Magnitude loss** — L1 on per-pixel channel norms (matches SAM embedding scale, not just direction):
+
+\[
+\mathcal{L}_{\text{mag}} = \frac{1}{B\,V\,H_s\,W_s} \sum_{b,v,h,w}
+\left|
+\|\hat{\mathbf{f}}_{b,v,h,w}\|_2 - \|\mathbf{f}^{\text{gt}}_{b,v,h,w}\|_2
+\right|
+\]
+
+**Optional RGB MSE** — from Hydra `loss: [mse]` ([`loss_mse.py`](../src/loss/loss_mse.py)); compares rendered `output.color` to GT images (target + context when `context_view_loss=true`):
+
+\[
+\mathcal{L}_{\text{mse}} = w_{\text{mse}} \cdot \frac{1}{B\,V\,3\,H\,W} \sum_{b,v,c,h,w} \big(\hat{I}_{b,v,c,h,w} - I^{\text{gt}}_{b,v,c,h,w}\big)^2
+\]
+
+**Total distillation loss:**
+
+\[
+\boxed{
+\mathcal{L}_{\text{distill}} =
+w_{\text{cos}}\,\mathcal{L}_{\text{cos}}
++ w_{\text{mag}}\,\mathcal{L}_{\text{mag}}
++ \mathcal{L}_{\text{mse}}
+}
+\]
+
+| Symbol | Config key | ScanNet default (`feature_head_sam_precomputed`) |
+|--------|------------|-----------------------------------------------|
+| \(w_{\text{cos}}\) | `train.feature_cosine_loss_weight` | `1.0` |
+| \(w_{\text{mag}}\) | `train.feature_mag_loss_weight` | `0.5` |
+| \(w_{\text{mse}}\) | `loss.mse.weight` | from `loss: [mse]` default |
+
+Code defaults (if keys omitted): `feature_cosine_loss_weight=1.0`, `feature_mag_loss_weight=0.1`.
+
+**No SAM mask decoder in the loss** — distillation never backprops through `SAMMaskDecoderWrapper`; it only supervises rendered embeddings directly against precomputed SAM maps.
+
+#### Prompted C3G-SAM objective (`ModelWrapper`)
+
+Implemented in [`model_wrapper.py`](../src/model/model_wrapper.py) + [`loss_segmentation_prompted.py`](../src/loss/loss_segmentation_prompted.py).
+
+**Feature rendering loss** (`train.feature_rendering_loss > 0`) — same cosine form as distillation, but GT SAM is **stopped** (`feature.detach()`) so gradients cannot flow into the frozen / precomputed SAM encoder:
+
+\[
+\mathcal{L}_{\text{feat}} = \frac{1}{B\,V\,H_s\,W_s} \sum_{b,v,h,w}
+\left(
+1 - \frac{\hat{\mathbf{f}}_{b,v,h,w}^{\top}\,\text{stopgrad}(\mathbf{f}^{\text{gt}}_{b,v,h,w})}
+{\|\hat{\mathbf{f}}_{b,v,h,w}\|_2\,\|\mathbf{f}^{\text{gt}}_{b,v,h,w}\|_2}
+\right)
+\]
+
+There is **no magnitude term** in the prompted ScanNet config (`feature_head_sam_prompted_scannet`).
+
+**Prompted segmentation loss** — only **target** rendered views (`prediction.feature[:, :V_t]`). For each batch index `b` and target view `v`:
+
+1. Decompose GT label map into \(K\) binary masks (one per non-background class id).
+2. Filter masks with \(\geq\) `min_object_pixels` foreground pixels.
+3. [`PromptSampler`](../src/model/prompt_sampler.py) picks **one** random valid object and returns a foreground point \((x,y)\) (centroid strategy) plus its binary mask \(\mathbf{y}\).
+4. Resize rendered features to \(64\times64\); run frozen `SAMMaskDecoderWrapper` → **3** mask logit maps \(\mathbf{m}^{(k)} \in \mathbb{R}^{256\times256}\), \(k \in \{1,2,3\}\) (SAM multimask output).
+
+Per sample \(n\) (one per valid \((b,v)\) pair), define pixel-wise BCE-with-logits and soft Dice on each hypothesis:
+
+\[
+\mathcal{L}_{\text{BCE}}^{(n,k)} = \text{mean}_{p}\,\text{BCEWithLogits}\!\big(\mathbf{m}^{(n,k)}_p,\, y^{(n)}_p\big)
+\]
+
+\[
+\mathcal{L}_{\text{Dice}}^{(n,k)} = 1 - \frac{2\sum_p \sigma(\mathbf{m}^{(n,k)}_p)\, y^{(n)}_p + 1}
+{\sum_p \sigma(\mathbf{m}^{(n,k)}_p) + \sum_p y^{(n)}_p + 1}
+\]
+
+**Best-of-3** (SAM ambiguity head — keep the hypothesis with lowest combined loss):
+
+\[
+\mathcal{L}_{\text{seg}}^{(n)} = \min_{k \in \{1,2,3\}} \big(\mathcal{L}_{\text{BCE}}^{(n,k)} + \mathcal{L}_{\text{Dice}}^{(n,k)}\big)
+\]
+
+\[
+\mathcal{L}_{\text{prompted}} = w_{\text{seg}} \cdot \frac{1}{N} \sum_{n=1}^{N} \mathcal{L}_{\text{seg}}^{(n)}
+\]
+
+where \(N\) is the number of valid \((b,v)\) samples (zero if all labels are background → loss returns `0` with `requires_grad=True`).
+
+**Optional RGB losses** — from Hydra `loss: [mse, lpips]` ([`config/main.yaml`](../config/main.yaml) defaults). These are wired through the same `for loss_fn in self.losses` loop in [`model_wrapper.py`](../src/model/model_wrapper.py) **before** feature and mask terms. GT images are concatenated **target-first** over \(V = V_t + V_c\) views:
+
+\[
+I^{\text{gt}}_{b,v} =
+\begin{cases}
+\text{batch["target"]["image"]}_{b,v} & v < V_t \\
+\frac{1}{2}\big(\text{batch["context"]["image"]}_{b,v} + 1\big) & v \geq V_t
+\end{cases}
+\]
+
+(context images are stored in \([-1,1]\); they are remapped to \([0,1]\) for RGB supervision.)
+
+**MSE** ([`loss_mse.py`](../src/loss/loss_mse.py)) on rendered `output.color` \(\hat{I}\) — the loss module returns the weighted value:
+
+\[
+\mathcal{L}_{\text{mse}} = w_{\text{mse}} \cdot \frac{1}{B\,V\,3\,H\,W} \sum_{b,v,c,h,w} \big(\hat{I}_{b,v,c,h,w} - I^{\text{gt}}_{b,v,c,h,w}\big)^2
+\]
+
+**LPIPS** ([`loss_lpips.py`](../src/loss/loss_lpips.py)) — frozen VGG-based perceptual distance, `normalize=True`, averaged over all \(B \cdot V\) views. Zero until `global_step ≥ apply_after_step`:
+
+\[
+\mathcal{L}_{\text{lpips}} =
+\begin{cases}
+w_{\text{lpips}} \cdot \text{mean}_{b,v}\,\text{LPIPS}\!\big(\hat{I}_{b,v},\, I^{\text{gt}}_{b,v}\big) & \text{step} \geq \text{apply\_after\_step} \\
+0 & \text{otherwise}
+\end{cases}
+\]
+
+**Total prompted loss** (full objective when `loss: [mse, lpips]` is enabled):
+
+\[
+\boxed{
+\mathcal{L}_{\text{prompted total}} =
+\mathcal{L}_{\text{mse}}
++ \mathcal{L}_{\text{lpips}}
++ w_{\text{feat}}\,\mathcal{L}_{\text{feat}}
++ \mathcal{L}_{\text{prompted}}
+}
+\]
+
+where \(\mathcal{L}_{\text{feat}}\) is the **unweighted** cosine mean above, \(\mathcal{L}_{\text{prompted}} = w_{\text{seg}} \cdot \frac{1}{N} \sum_{n} \mathcal{L}_{\text{seg}}^{(n)}\) (weight applied inside [`LossSegmentationPrompted`](../src/loss/loss_segmentation_prompted.py)), and \(\mathcal{L}_{\text{mse}}, \mathcal{L}_{\text{lpips}}\) already include \(w_{\text{mse}}, w_{\text{lpips}}\) from the `loss:` configs — matching the summation order in `ModelWrapper.training_step`.
+
+| Symbol | Config key | Shipped prompted default |
+|--------|------------|--------------------------|
+| \(w_{\text{feat}}\) | `train.feature_rendering_loss` | `1.0` |
+| \(w_{\text{seg}}\) | `train.prompted_seg_loss_weight` | `0.1` |
+| \(w_{\text{mse}}\) | `loss.mse.weight` | `1.0` ([`config/loss/mse.yaml`](../config/loss/mse.yaml)) |
+| \(w_{\text{lpips}}\) | `loss.lpips.weight` | `0.05` ([`config/loss/lpips.yaml`](../config/loss/lpips.yaml)) |
+| LPIPS delay | `loss.lpips.apply_after_step` | `0` |
+
+Shipped prompted configs [`feature_head_sam_prompted_scannet.yaml`](../config/training/feature_head_sam_prompted_scannet.yaml) and [`feature_head_sam_prompted.yaml`](../config/training/feature_head_sam_prompted.yaml) include `loss: [mse, lpips]` alongside \(\mathcal{L}_{\text{feat}}\) and \(\mathcal{L}_{\text{prompted}}\). Omit RGB terms with `override /loss: []` if desired.
+
+**Gradient note:** when `prompt_mode=prompted`, Gaussian **geometry and harmonics are detached** before the decoder, so \(\mathcal{L}_{\text{mse}}\) and \(\mathcal{L}_{\text{lpips}}\) are included in `loss/total` but **do not backprop into the encoder** — only \(\mathcal{L}_{\text{feat}}\) and the mask path train Instill / per-Gaussian `feature`. RGB losses matter when geometry is *not* detached (e.g. non-prompted `feature_head_sam` with `loss: [mse, lpips]`).
+
+#### Gradient flow (what is trained)
+
+```mermaid
+flowchart LR
+    subgraph DISTILL["Distillation"]
+        D1["L_cos, L_mag"] --> D2["rendered f_hat"]
+        D2 --> D3["rasterizer"]
+        D3 --> D4["Gaussians.feature + Instill V"]
+    end
+
+    subgraph PROMPT["Prompted"]
+        P1["L_feat"] --> P2["rendered f_hat"]
+        P3["L_prompted"] --> P4["frozen SAM mask decoder"]
+        P4 --> P2
+        P2 --> P5["rasterizer"]
+        P5 --> P6["Gaussians.feature + Instill V"]
+    end
+```
+
+| Quantity | Receives gradients from feature / mask losses? |
+|----------|-----------------------------------------------|
+| Per-Gaussian `feature`, Instill V-stream, feature heads | **Yes** |
+| Gaussian means, covariances, opacities, harmonics | **No** (detached before decode) |
+| VGGT backbone, DPT geometry head, Instill Q/K | **No** (frozen) |
+| SAM image encoder | **No** (not loaded or frozen; GT features detached in prompted path) |
+| SAM mask decoder weights | **No** (frozen; acts as a fixed differentiable head on rendered features) |
+
+#### Side-by-side summary
+
+| | Distillation | Prompted C3G-SAM |
+|---|--------------|------------------|
+| Wrapper | `DistillationModelWrapper` | `ModelWrapper` |
+| Feature supervision | \(\mathcal{L}_{\text{cos}} + \mathcal{L}_{\text{mag}}\) vs precomputed SAM | \(\mathcal{L}_{\text{feat}}\) (cosine only) vs SAM |
+| RGB supervision | Optional `mse` (+ `lpips`) | Optional `mse` + `lpips` (usually omitted; no grad to encoder when geometry detached) |
+| Mask supervision | None | \(\mathcal{L}_{\text{prompted}}\) (BCE + Dice, best-of-3) via frozen SAM mask decoder |
+| Views in feature loss | \(V_t + V_c\) when `context_view_loss=true` | Same |
+| Views in mask loss | — | \(V_t\) only |
+| SAM mask decoder in loss | No | Yes (frozen) |
+
+### 5.5 What is frozen vs trained (typical SAM config)
 
 | Module | Distillation | Prompted |
 |--------|--------------|----------|

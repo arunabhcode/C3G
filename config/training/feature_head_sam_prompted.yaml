@@ -4,9 +4,7 @@ defaults:
   # Dataset is selected at launch, e.g. +dataset@_group_.scannet_2dseg=scannet_2dseg
   - override /model/encoder: noposplat
   - override /model/encoder/backbone: croco
-  - override /loss: []
-
-loss: {}
+  - override /loss: [mse, lpips]
 
 wandb:
   name: replica_sam_prompted
