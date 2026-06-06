@@ -10,13 +10,14 @@ identical class colors across all figures (background = black).
 Examples::
 
     modal run src/modal_infra/seg_viz.py --wait
-    modal run src/modal_infra/seg_viz.py --output-dir seg_results --wait
+    modal run src/modal_infra/seg_viz.py --output-dir c3gsam_results/seg_results --wait
     python -m src.modal_infra.seg_viz \\
         --replica-root /path/to/replica \\
         --scannet-root /path/to/scannet \\
         --sam-root /path/to/vanilla-sam-outputs \\
         --c3gsam-root /path/to/c3g-sam-eval-outputs \\
-        --output-dir seg_results
+        --output-dir c3gsam_results/seg_results
+    python -m src.modal_infra.seg_viz --table-only
 """
 
 from __future__ import annotations
@@ -55,7 +56,7 @@ REMOTE_SCRATCH_DIR = Path("/tmp/seg_viz")
 
 
 def default_local_output_dir() -> Path:
-    return Path(__file__).resolve().parents[2] / "seg_results"
+    return Path(__file__).resolve().parents[2] / "c3gsam_results" / "seg_results"
 
 C3G_SAM_DFT_EVAL_OUTPUT_VOLUME = "c3g-sam-dft-eval-outputs"
 C3G_SAM_DFT_EVAL_OUTPUT_MOUNT = Path("/c3g-sam-dft-eval-outputs")
@@ -81,6 +82,46 @@ EXPERIMENT_PRED_ROOTS: dict[ExperimentName, Path] = {
     "c3gsam-nomaghead": C3G_SAM_NOMAGHEAD_EVAL_OUTPUT_MOUNT,
     "c3gsam-ema-nomag": C3G_SAM_EMA_NOMAG_EVAL_OUTPUT_MOUNT,
 }
+
+TableExperiment = ExperimentName | Literal["gt"]
+ComparisonTableRow = tuple[TableExperiment, str]
+
+COMPARISON_TABLE_ROWS: tuple[ComparisonTableRow, ...] = (
+    ("gt", "GT"),
+    ("sam", "SAM"),
+    ("c3gsam", "C3G-SAM"),
+    ("c3gsam-dft", "C3G-SAM (DFT)"),
+    ("c3gsam-nomaghead", "C3G-SAM (no mag head)"),
+    ("c3gsam-ema-nomag", "C3G-SAM (EMA, no mag)"),
+)
+COMPARISON_TABLE_FILENAME = "comparison_table.png"
+COMPARISON_TABLE_MAIN_FILENAME = "comparison_table_main.png"
+COMPARISON_TABLE_ABLATION_FILENAME = "comparison_table_ablation.png"
+COMPARISON_TABLE_CONFIGS: tuple[tuple[str, tuple[ComparisonTableRow, ...]], ...] = (
+    (
+        COMPARISON_TABLE_MAIN_FILENAME,
+        (
+            ("gt", "GT"),
+            ("sam", "SAM"),
+            ("c3gsam", "C3G-SAM"),
+        ),
+    ),
+    (
+        COMPARISON_TABLE_ABLATION_FILENAME,
+        (
+            ("gt", "GT"),
+            ("c3gsam-nomaghead", "no EMA + no mag head"),
+            ("c3gsam-ema-nomag", "EMA + no mag head"),
+            ("c3gsam", "EMA + mag head + zero pad"),
+            ("c3gsam-dft", "EMA + mag head + up proj"),
+        ),
+    ),
+)
+MASK_FIGURE_HEADER_HEIGHT = 48
+TABLE_FONT_SIZE = 40
+TABLE_HEADER_FONT_SIZE = 44
+TABLE_LABEL_PADDING = 28
+TABLE_HEADER_PADDING = 20
 
 # Same palette as src/visualization/colors.py, excluding black/white for foreground.
 FOREGROUND_HEX_COLORS = [
@@ -419,7 +460,7 @@ def _save_two_mask_figure(
     rgb_a = _colorize_dense_mask(mask_a, colormap)
     rgb_b = _colorize_dense_mask(mask_b, colormap)
     gap = 8
-    header_height = 48
+    header_height = MASK_FIGURE_HEADER_HEIGHT
     panel_width = rgb_a.shape[1] + rgb_b.shape[1] + gap
     panel_height = max(rgb_a.shape[0], rgb_b.shape[0])
     canvas = Image.new(
@@ -437,6 +478,251 @@ def _save_two_mask_figure(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(output_path)
+
+
+def _strip_figure_header(image, header_height: int = MASK_FIGURE_HEADER_HEIGHT):
+    if image.height <= header_height:
+        return image
+    return image.crop((0, header_height, image.width, image.height))
+
+
+def _load_table_font(size: int):
+    from PIL import ImageFont
+
+    candidates = (
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/Library/Fonts/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    )
+    for path in candidates:
+        if Path(path).is_file():
+            return ImageFont.truetype(path, size=size)
+    return ImageFont.load_default()
+
+
+def _label_column_width(labels: list[str], font, *, padding: int = 16) -> int:
+    from PIL import Image, ImageDraw
+
+    draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    widths = [
+        draw.textbbox((0, 0), label, font=font)[2]
+        - draw.textbbox((0, 0), label, font=font)[0]
+        for label in labels
+    ]
+    return max(widths, default=0) + padding
+
+
+def _crop_center_to_size(image, width: int, height: int):
+    from PIL import Image
+
+    if image.size == (width, height):
+        return image
+    scale = max(width / image.width, height / image.height)
+    scaled = image.resize(
+        (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+        Image.Resampling.LANCZOS,
+    )
+    left = max(0, (scaled.width - width) // 2)
+    top = max(0, (scaled.height - height) // 2)
+    return scaled.crop((left, top, left + width, top + height))
+
+
+def _table_cell_size(
+    replica_image,
+    scannet_image,
+    *,
+    max_cell_width: int,
+) -> tuple[int, int]:
+    reference = replica_image or scannet_image
+    assert reference is not None
+    reference = _strip_figure_header(reference)
+    width, height = reference.size
+    if width > max_cell_width:
+        scale = max_cell_width / width
+        width = max_cell_width
+        height = max(1, round(height * scale))
+    return width, height
+
+
+def _prepare_table_cell(image, target_size: tuple[int, int]):
+    stripped = _strip_figure_header(image)
+    return _crop_center_to_size(stripped, target_size[0], target_size[1])
+
+
+def _draw_centered_text(
+    draw,
+    box: tuple[int, int, int, int],
+    text: str,
+    *,
+    fill: tuple[int, int, int] = (255, 255, 255),
+    font,
+) -> None:
+    left, top, right, bottom = box
+    text_bbox = draw.textbbox((0, 0), text, font=font)
+    text_width = text_bbox[2] - text_bbox[0]
+    text_height = text_bbox[3] - text_bbox[1]
+    x = left + max(0, (right - left - text_width) // 2)
+    y = top + max(0, (bottom - top - text_height) // 2)
+    draw.text((x, y), text, fill=fill, font=font)
+
+
+def build_seg_comparison_table(
+    *,
+    input_dir: str | Path | None = None,
+    output_path: str | Path | None = None,
+    rows: tuple[ComparisonTableRow, ...] = COMPARISON_TABLE_ROWS,
+    max_cell_width: int = 640,
+) -> Path | None:
+    """Compose a method | ScanNet | Replica table from existing seg PNGs."""
+    from PIL import Image, ImageDraw
+
+    in_dir = (input_dir or default_local_output_dir()).resolve()
+    out_path = (
+        Path(output_path)
+        if output_path is not None
+        else in_dir / COMPARISON_TABLE_FILENAME
+    ).resolve()
+
+    font = _load_table_font(TABLE_FONT_SIZE)
+    header_font = _load_table_font(TABLE_HEADER_FONT_SIZE)
+    row_gap = 2
+    column_gap = 2
+    margin = 2
+    placeholder_color = (24, 24, 24)
+
+    loaded_rows: list[tuple[str, Image.Image | None, Image.Image | None]] = []
+    for experiment, label in rows:
+        scannet_path = in_dir / f"{experiment}_scannet.png"
+        replica_path = in_dir / f"{experiment}_replica.png"
+        scannet_image = (
+            Image.open(scannet_path).convert("RGB")
+            if scannet_path.is_file()
+            else None
+        )
+        replica_image = (
+            Image.open(replica_path).convert("RGB")
+            if replica_path.is_file()
+            else None
+        )
+        if scannet_image is None and replica_image is None:
+            continue
+        loaded_rows.append((label, scannet_image, replica_image))
+
+    if not loaded_rows:
+        print(f"No seg figures found under {in_dir} for {out_path.name}")
+        return None
+    labels = [label for label, _, _ in loaded_rows]
+    label_column_width = _label_column_width(
+        labels, font, padding=TABLE_LABEL_PADDING
+    )
+    header_height = TABLE_HEADER_FONT_SIZE + TABLE_HEADER_PADDING
+
+    prepared_rows: list[tuple[str, Image.Image | None, Image.Image | None, tuple[int, int]]] = []
+    for label, scannet_image, replica_image in loaded_rows:
+        cell_size = _table_cell_size(
+            replica_image,
+            scannet_image,
+            max_cell_width=max_cell_width,
+        )
+        prepared_rows.append(
+            (
+                label,
+                _prepare_table_cell(scannet_image, cell_size)
+                if scannet_image is not None
+                else None,
+                _prepare_table_cell(replica_image, cell_size)
+                if replica_image is not None
+                else None,
+                cell_size,
+            )
+        )
+
+    cell_width, cell_height = prepared_rows[0][3]
+    body_height = cell_height * len(prepared_rows) + row_gap * (len(prepared_rows) - 1)
+    canvas_width = (
+        margin * 2
+        + label_column_width
+        + column_gap
+        + cell_width
+        + column_gap
+        + cell_width
+    )
+    canvas_height = margin * 2 + header_height + row_gap + body_height
+    canvas = Image.new("RGB", (canvas_width, canvas_height), color=(0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+
+    scannet_left = margin + label_column_width + column_gap
+    replica_left = scannet_left + cell_width + column_gap
+    header_top = margin
+    _draw_centered_text(
+        draw,
+        (margin, header_top, margin + label_column_width, header_top + header_height),
+        "Method",
+        font=header_font,
+    )
+    _draw_centered_text(
+        draw,
+        (scannet_left, header_top, scannet_left + cell_width, header_top + header_height),
+        "ScanNet",
+        font=header_font,
+    )
+    _draw_centered_text(
+        draw,
+        (replica_left, header_top, replica_left + cell_width, header_top + header_height),
+        "Replica",
+        font=header_font,
+    )
+
+    y = margin + header_height + row_gap
+    for label, scannet_image, replica_image, (row_cell_width, row_cell_height) in prepared_rows:
+        _draw_centered_text(
+            draw,
+            (margin, y, margin + label_column_width, y + row_cell_height),
+            label,
+            font=font,
+        )
+
+        for column_left, image in (
+            (scannet_left, scannet_image),
+            (replica_left, replica_image),
+        ):
+            if image is None:
+                placeholder = Image.new(
+                    "RGB",
+                    (row_cell_width, row_cell_height),
+                    color=placeholder_color,
+                )
+                canvas.paste(placeholder, (column_left, y))
+                continue
+            canvas.paste(image, (column_left, y))
+
+        y += row_cell_height + row_gap
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(out_path)
+    print(f"Wrote comparison table to {out_path}")
+    return out_path
+
+
+def build_all_comparison_tables(
+    *,
+    input_dir: str | Path | None = None,
+    max_cell_width: int = 640,
+) -> list[Path]:
+    """Build the preset main and ablation comparison tables."""
+    in_dir = (input_dir or default_local_output_dir()).resolve()
+    written: list[Path] = []
+    for filename, rows in COMPARISON_TABLE_CONFIGS:
+        path = build_seg_comparison_table(
+            input_dir=in_dir,
+            output_path=in_dir / filename,
+            rows=rows,
+            max_cell_width=max_cell_width,
+        )
+        if path is not None:
+            written.append(path)
+    return written
 
 
 def _dataset_roots(replica_root: str, scannet_root: str) -> dict[DatasetName, Path]:
@@ -678,17 +964,35 @@ def main(
     if detached:
         print(
             "Detached run: figures are not saved locally. "
-            "Re-run with --wait to write into seg_results/."
+            "Re-run with --wait to write into c3gsam_results/seg_results/."
         )
         return
 
     local_out = Path(output_dir) if output_dir else default_local_output_dir()
     save_figures_locally(report, local_out)
+    build_all_comparison_tables(input_dir=local_out)
 
 
 def _parse_local_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Render colored dense-mask figures from eval outputs."
+    )
+    parser.add_argument(
+        "--table-only",
+        action="store_true",
+        help=(
+            "Build preset comparison tables from existing PNG files in "
+            "--output-dir (skip eval figure generation)."
+        ),
+    )
+    parser.add_argument(
+        "--table-output",
+        type=Path,
+        default=None,
+        help=(
+            "Write a single full comparison table to this path instead of the "
+            "preset main/ablation tables."
+        ),
     )
     parser.add_argument("--replica-root", type=Path, default=None)
     parser.add_argument("--scannet-root", type=Path, default=None)
@@ -713,6 +1017,16 @@ def _parse_local_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main_local(argv: list[str] | None = None) -> None:
     args = _parse_local_args(argv)
+    if args.table_only:
+        if args.table_output is not None:
+            build_seg_comparison_table(
+                input_dir=args.output_dir,
+                output_path=args.table_output,
+            )
+        else:
+            build_all_comparison_tables(input_dir=args.output_dir)
+        return
+
     pred_roots = _resolve_pred_roots(
         {
             "sam": args.sam_root,
@@ -730,6 +1044,7 @@ def main_local(argv: list[str] | None = None) -> None:
         seed=args.seed,
         min_object_pixels=args.min_object_pixels,
     )
+    build_all_comparison_tables(input_dir=args.output_dir)
 
 
 if __name__ == "__main__":
