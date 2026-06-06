@@ -363,15 +363,7 @@ class ModelWrapper(LightningModule):
         )
 
     def _gaussians_for_prompted_loss(self, gaussians: Gaussians) -> Gaussians:
-        if self.train_cfg.prompt_mode != "prompted":
-            return gaussians
-        return Gaussians(
-            means=gaussians.means.detach(),
-            covariances=gaussians.covariances.detach(),
-            harmonics=gaussians.harmonics.detach(),
-            opacities=gaussians.opacities.detach(),
-            feature=gaussians.feature,
-        )
+        return gaussians
 
     def _decoder_output_all_train_views(
         self, gaussians: Gaussians, batch: BatchedExample, h: int, w: int
@@ -802,15 +794,6 @@ class ModelWrapper(LightningModule):
             visualization_dump=visualization_dump,
             context_feature=context_feature,
         )
-
-        if self.train_cfg.prompt_mode == "prompted":
-            gaussians = Gaussians(
-                means=gaussians.means.detach(),
-                covariances=gaussians.covariances.detach(),
-                harmonics=gaussians.harmonics.detach(),
-                opacities=gaussians.opacities.detach(),
-                feature=gaussians.feature,
-            )
 
         output = self.decoder.forward(
             gaussians,

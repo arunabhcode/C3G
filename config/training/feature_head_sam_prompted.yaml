@@ -26,13 +26,13 @@ model:
     pretrained_weights: "./pretrained_weights/model.pt"
     init_points: one_point
     gaussian_feature_dim: 256
-    freeze_backbone: true
-    freeze_instill_qk: true
-    freeze_geometry_head: true
+    freeze_backbone: false
+    freeze_instill_qk: false
+    freeze_geometry_head: false
   decoder:
     make_scale_invariant: true
     decrease_lpf_step: 1000
-    feature_detach: true
+    feature_detach: false
 
 optimizer:
   lr: 1e-5

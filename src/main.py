@@ -55,12 +55,32 @@ def uses_precomputed_sam_features(cfg_dict: DictConfig) -> bool:
     return False
 
 
+def configure_prompted_sam_unfrozen_training(cfg_dict: DictConfig) -> None:
+    """Train all C3G components; keep only SAM encoder and mask decoder frozen."""
+    if cfg_dict.get("train", {}).get("prompt_mode") != "prompted":
+        return
+
+    OmegaConf.set_struct(cfg_dict, False)
+    cfg_dict.model.encoder.freeze_backbone = False
+    cfg_dict.model.encoder.freeze_instill_qk = False
+    cfg_dict.model.encoder.freeze_geometry_head = False
+    cfg_dict.model.decoder.feature_detach = False
+    OmegaConf.set_struct(cfg_dict, True)
+    print(
+        cyan(
+            "Prompted SAM: training full C3G encoder/decoder "
+            "(SAM image encoder + mask decoder stay frozen)."
+        )
+    )
+
+
 @hydra.main(
     version_base=None,
     config_path="../config",
     config_name="main",
 )
 def train(cfg_dict: DictConfig):
+    configure_prompted_sam_unfrozen_training(cfg_dict)
     cfg = load_typed_root_config(cfg_dict)
     set_cfg(cfg_dict)
 
@@ -382,6 +402,18 @@ def train(cfg_dict: DictConfig):
             mode=cfg.mode,
             debug_decoder_cfg=debug_decoder_cfg,
         )
+        if cfg.train.prompt_mode == "prompted":
+            if sam_encoder is not None:
+                for param in sam_encoder.parameters():
+                    param.requires_grad = False
+                sam_encoder.eval()
+            prompted_loss = getattr(
+                model_wrapper, "prompted_segmentation_loss", None
+            )
+            if prompted_loss is not None:
+                for param in prompted_loss.mask_decoder.parameters():
+                    param.requires_grad = False
+                prompted_loss.mask_decoder.eval()
     data_module = DataModule(
         cfg.dataset,
         cfg.data_loader,
