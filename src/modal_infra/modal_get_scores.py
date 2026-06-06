@@ -876,6 +876,7 @@ def _commit_pred_volume(experiment: ExperimentName) -> None:
     memory=32768,
     timeout=60 * 60 * 6,
     volumes=SCORE_VOLUMES,
+    nonpreemptible=True,
 )
 def compute_scores(
     experiment: str = "sam",
@@ -934,6 +935,7 @@ def compute_scores(
     memory=8192,
     timeout=60 * 30,
     volumes=SCORE_VOLUMES,
+    nonpreemptible=True,
 )
 def smoke_scores(
     experiment: str = "sam",

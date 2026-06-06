@@ -175,6 +175,74 @@ RGB (any size) → resize 1024×1024 → SAM ViT-H encoder → save [256, 64, 64
 
 Volume layout: `precompute_sam_features/scannet/<scene_id>/{frame_id}_sam.pt`
 
+### 2.1 View selection, validation & checkpointing (SAM prompted & distillation)
+
+`src/main.py` does **not** pick views. It builds a `DataModule` with a shared `StepTracker`; each dataset calls `view_sampler.sample()` per scene and yields `batch["context"]` / `batch["target"]`.
+
+**Configs:** both [`feature_head_sam_precomputed`](../config/training/feature_head_sam_precomputed.yaml) (distillation, `scannet_distill`) and [`feature_head_sam_prompted_scannet`](../config/training/feature_head_sam_prompted_scannet.yaml) (prompted, `scannet_2dseg`) use **`ViewSamplerBounded`** with [`bounded_scannet_2dseg`](../config/dataset/view_sampler_dataset_specific_config/bounded_scannet_2dseg.yaml) overrides on top of [`bounded.yaml`](../config/dataset/view_sampler/bounded.yaml).
+
+| Parameter | Value |
+|-----------|-------|
+| `num_context_views` (`V_c`) | 2 |
+| `num_target_views` (`V_t`) | 4 (`base_view_sampler`) |
+| Context gap (frames between the two context views) | random in `[1, 6]` |
+| `min_distance_to_context_views` | 2 — targets must be ≥2 frames inside each context endpoint |
+| `warm_up_steps` | 0 (no gap curriculum) |
+| `cameras_are_circular` | false |
+
+**Per-scene sampling** ([`view_sampler_bounded.py`](../src/dataset/view_sampler/view_sampler_bounded.py)):
+
+1. Draw a random gap `g ∈ [1, 6]` and a random left context index; right context = left + `g`.
+2. **Training:** draw `V_t` random target indices in `(left + 2, right − 2)` (open interval via `randint` bounds).
+3. **Test:** all frames in `[left, right]` (dataset may subsample to `V_t` afterward).
+4. Scenes with `< V_c + 1` frames or invalid poses are skipped.
+
+**Dataset post-processing** ([`dataset_scannet_2dseg.py`](../src/dataset/dataset_scannet_2dseg.py), [`dataset_scannet_distill.py`](../src/dataset/dataset_scannet_distill.py)): if the sampler returns more targets than `V_t`, subsample without replacement; load frames as `context_indices + target_indices`; apply baseline scaling (`make_baseline_1`) and `camera_normalization`; split tensors at `num_ctx`.
+
+**Train-time view usage** (both modes, `context_view_loss: true`):
+
+| Stage | Context views | Target views |
+|-------|---------------|--------------|
+| Encoder / Instill | `V_c` context images + SAM only | not fed in |
+| Decoder (train) | re-render at `V_c` context poses | render at `V_t` target poses → `V = V_t + V_c` total |
+| Feature loss | supervises both rendered groups vs GT SAM | same |
+| Prompted mask loss | — | `V_t` only |
+
+`random_select_context_view` is **off** in both shipped SAM configs (multiview-only option in `ModelWrapper`).
+
+#### Validation
+
+| | Distillation | Prompted |
+|---|--------------|----------|
+| Config | `feature_head_sam_precomputed` | `feature_head_sam_prompted_scannet` |
+| `trainer.val_check_interval` | **500** optimizer steps | **500** optimizer steps |
+| `accumulate_grad_batches` | 2 | 6 |
+| Lightning interval | 500 × accumulate = **1000** / **3000** dataloader batches | same formula |
+| `max_steps` | 5001 → **~10** val epochs | same |
+| `num_sanity_val_steps` | 0 | 0 |
+
+[`val_check_interval_in_training_batches`](../src/config.py) multiplies the config value by `accumulate_grad_batches` before passing to Lightning (config counts **optimizer steps**, not raw batches).
+
+**Val dataloader:** [`ValidationWrapper`](../src/dataset/validation_wrapper.py) with `data_loader.val.limit_batches: 80` ([`main.yaml`](../config/main.yaml)) — up to 80 random val batches (one per held-out ScanNet scene when using `val_scene_count: 80`). Batch size 6.
+
+**Logged metrics:**
+
+- **Distillation** ([`distillation_wrapper.validation_step`](../src/model/distillation_wrapper.py)): `val/feature_cosine`, `val/feature_mag` (no `val/loss`; checkpointing does not use val metrics).
+- **Prompted** ([`model_wrapper.validation_step`](../src/model/model_wrapper.py)): `val/loss` (total prompted objective), `val/feature_rendering_loss`, `val/prompted_segmentation`, `val/sam_miou`, `val/sam_boundary_miou`, plus `val/psnr` / `val/lpips` / `val/ssim` on target RGB. Primary render for image metrics is **target views only**; `val/loss` uses the same multi-view render as training (`V_t + V_c`).
+
+#### Checkpointing
+
+All runs write to `outputs/.../checkpoints/` via Lightning [`ModelCheckpoint`](../src/main.py) (`save_last=True` always).
+
+| | Distillation (`feature_head_sam_precomputed`) | Prompted (`feature_head_sam_prompted_scannet`) |
+|---|-----------------------------------------------|------------------------------------------------|
+| `every_n_train_steps` | **50** — periodic step saves | **not set** — no step-interval saves |
+| `monitor` / `mode` | `info/global_step` / **max** (default) | **`val/loss`** / **min** |
+| `save_top_k` | 20 | 5 |
+| What gets kept | Top-20 highest-step checkpoints + `last` + every-50-step snapshots | Top-5 lowest `val/loss` + `last` |
+
+Distillation logs `info/global_step` each training step ([`distillation_wrapper.training_step`](../src/model/distillation_wrapper.py)) so `ModelCheckpoint` can rank by step. Prompted ranks on validation loss after each val epoch (`val/loss` from `_compute_prompted_losses`). Neither SAM config overrides `save_weights_only` (full checkpoints, not weights-only).
+
 ---
 
 ## 3. Gaussian encoder (`EncoderVGGT`)
