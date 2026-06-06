@@ -1,4 +1,10 @@
-"""Generate training loss figures from W&B-exported CSV logs."""
+"""Generate training loss figures from W&B-exported CSV logs.
+
+Form1 plots use prompted ScanNet training (``feature_head_sam_prompted_scannet``).
+W&B CSV columns ``loss:rgb_mse`` / ``loss:rgb_lpips`` hold **already-weighted**
+``loss/mse`` and ``loss/lpips`` scalars from ``ModelWrapper.training_step``.
+Coefficients come from ``config/loss/mse.yaml`` and ``config/loss/lpips.yaml``.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +19,11 @@ STEP_COLUMN = "trainer/global_step"
 LINE_ALPHA = 0.7
 TITLE_FONTSIZE = plt.rcParams["axes.titlesize"]
 TICK_FONTSIZE = plt.rcParams["xtick.labelsize"]
+
+# Weight applied inside LossMse / LossLpips before logging (see config/loss/*.yaml).
+RGB_MSE_COEF = 1.0
+RGB_LPIPS_COEF = 0.05
+RGB_LOSS_TITLE = f"RGB Loss ({RGB_MSE_COEF}×MSE + {RGB_LPIPS_COEF}×LPIPS)"
 
 
 def _load_loss_csv(path: Path) -> pd.DataFrame:
@@ -65,7 +76,7 @@ def plot_loss_figure(data_dir: Path, output_path: Path) -> None:
     ax_seg = fig.add_subplot(gs[1, 2], sharex=ax_rgb)
 
     _plot_loss(ax_total, total[STEP_COLUMN], total["value"], title="Total Loss", color="brown")
-    _plot_loss(ax_rgb, rgb[STEP_COLUMN], rgb["value"], title="RGB Loss", color="red")
+    _plot_loss(ax_rgb, rgb[STEP_COLUMN], rgb["value"], title=RGB_LOSS_TITLE, color="red")
     _plot_loss(
         ax_feature, feature[STEP_COLUMN], feature["value"], title="Feature Loss", color="green"
     )
